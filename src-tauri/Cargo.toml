@@ -1,0 +1,57 @@
+[package]
+name = "spoke"
+version = "0.1.0"
+description = "Cross-platform voice-to-text dictation for the desktop"
+authors = ["Spoke"]
+edition = "2021"
+rust-version = "1.77"
+
+[lib]
+# Tauri mobile expects a cdylib; desktop uses the rlib. Harmless on desktop.
+name = "spoke_lib"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "macos-private-api"] }
+tauri-plugin-global-shortcut = "2"
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Audio capture + WAV encoding
+cpal = "0.15"
+hound = "3.5"
+
+# Text injection
+enigo = "0.2"
+
+# Online STT (Google Cloud Speech-to-Text v2)
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+base64 = "0.22"
+
+# Async runtime
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+
+# Misc
+anyhow = "1"
+thiserror = "2"
+dirs = "5"
+
+# Offline STT — heavy native build (whisper.cpp + cmake). Opt in with `--features whisper`.
+whisper-rs = { version = "0.11", optional = true }
+
+[features]
+default = []
+# Enable local Whisper transcription. Requires cmake + a C/C++ toolchain.
+whisper = ["dep:whisper-rs"]
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true

@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Spoke</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <!-- Everything sits in the bottom-right; the rest of the window is transparent. -->
+    <main id="root">
+      <!-- Settings panel (hidden until the bubble is clicked) -->
+      <section id="panel" class="hidden" aria-label="Spoke settings">
+        <header class="panel-row panel-title">
+          <span>Spoke</span>
+          <span id="version" class="muted">v0.1.0</span>
+        </header>
+
+        <div class="panel-row">
+          <label for="mode">Mode</label>
+          <select id="mode">
+            <option value="offline">Offline</option>
+            <option value="online">Online</option>
+          </select>
+        </div>
+
+        <div class="panel-row">
+          <label for="trigger">Trigger</label>
+          <select id="trigger">
+            <option value="push_to_talk">Push to talk</option>
+            <option value="toggle">Toggle</option>
+          </select>
+        </div>
+
+        <div class="panel-row">
+          <label>Hotkey</label>
+          <div class="hotkey-ctl">
+            <span id="hotkey" class="hotkey-display">—</span>
+            <button id="recordHotkey" type="button" class="mini-btn">Record</button>
+          </div>
+        </div>
+
+        <div class="panel-row">
+          <label for="language">Language</label>
+          <select id="language">
+            <option value="auto">Auto</option>
+            <option value="en">English</option>
+            <option value="da">Danish</option>
+            <option value="de">German</option>
+            <option value="es">Spanish</option>
+            <option value="fr">French</option>
+          </select>
+        </div>
+
+        <!-- Offline-only -->
+        <div class="panel-row offline-only">
+          <label for="model">Model</label>
+          <select id="model">
+            <option value="tiny">tiny</option>
+            <option value="base">base</option>
+            <option value="small">small</option>
+            <option value="large-v3-turbo">large-v3-turbo</option>
+          </select>
+        </div>
+
+        <!-- Online-only -->
+        <div class="panel-row online-only">
+          <label for="apikey">API key</label>
+          <input id="apikey" type="password" spellcheck="false" />
+        </div>
+
+        <div class="panel-row">
+          <label for="saveAudio">Save audio</label>
+          <input id="saveAudio" type="checkbox" />
+        </div>
+
+        <div class="panel-row save-path-row">
+          <label for="savePath">Save path</label>
+          <input id="savePath" type="text" spellcheck="false" />
+        </div>
+
+        <p id="status" class="muted status"></p>
+      </section>
+
+      <!-- The bubble -->
+      <button id="bubble" class="idle" aria-label="Spoke">
+        <canvas id="ring" width="96" height="96"></canvas>
+        <svg class="mic" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+          <path
+            fill="currentColor"
+            d="M12 14a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v5a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2z"
+          />
+        </svg>
+      </button>
+    </main>
+
+    <script src="main.js"></script>
+  </body>
+</html>
