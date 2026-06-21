@@ -48,6 +48,11 @@ whisper-rs = { version = "0.16", optional = true }
 default = []
 # Enable local Whisper transcription. Requires cmake + a C/C++ toolchain.
 whisper = ["dep:whisper-rs"]
+# NVIDIA GPU acceleration for Whisper. Requires the CUDA toolkit (nvcc) at build
+# time. Enable alongside `whisper`, e.g. `--features whisper,cuda`.
+cuda = ["whisper-rs/cuda"]
+# AMD/Intel/cross-vendor GPU acceleration via Vulkan. Alternative to `cuda`.
+vulkan = ["whisper-rs/vulkan"]
 
 [profile.release]
 codegen-units = 1
