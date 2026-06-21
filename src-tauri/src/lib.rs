@@ -8,25 +8,70 @@ mod inject;
 mod stt;
 
 use audio::AudioEngine;
-use config::{Config, Trigger};
+use config::{Config, Mode, Trigger};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
+use stt::SttEngine;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+
+/// Identifies the config fields that determine how an `SttEngine` is built.
+/// When these are unchanged we reuse the cached engine instead of rebuilding —
+/// rebuilding the offline engine reloads the whole Whisper model into RAM, which
+/// is the dominant memory cost per transcription.
+#[derive(PartialEq, Eq)]
+struct EngineKey {
+    mode: Mode,
+    model: String,
+    use_gpu: bool,
+    provider: String,
+    api_key: String,
+}
+
+impl EngineKey {
+    fn from_config(cfg: &Config) -> Self {
+        Self {
+            mode: cfg.general.mode,
+            model: cfg.offline.model.clone(),
+            use_gpu: cfg.offline.use_gpu,
+            provider: cfg.online.provider.clone(),
+            api_key: cfg.online.api_key.clone(),
+        }
+    }
+}
 
 /// Shared application state, managed by Tauri as `Arc<SpokeState>`.
 pub struct SpokeState {
     config: Mutex<Config>,
     audio: AudioEngine,
     recording: AtomicBool,
+    /// Cached STT engine + the config signature it was built for. Built lazily
+    /// on first transcription and reused until the relevant config changes.
+    engine: Mutex<Option<(EngineKey, Arc<SttEngine>)>>,
 }
 
 impl SpokeState {
     fn config_snapshot(&self) -> Config {
         self.config.lock().unwrap().clone()
+    }
+
+    /// Return the cached STT engine, rebuilding it only when the engine-relevant
+    /// config has changed since it was last built. The returned `Arc` is cloned
+    /// out so the lock isn't held across the (possibly async) transcription.
+    fn engine(&self, cfg: &Config) -> anyhow::Result<Arc<SttEngine>> {
+        let key = EngineKey::from_config(cfg);
+        let mut slot = self.engine.lock().unwrap();
+        if let Some((cached_key, engine)) = slot.as_ref() {
+            if *cached_key == key {
+                return Ok(engine.clone());
+            }
+        }
+        let engine = Arc::new(SttEngine::from_config(cfg)?);
+        *slot = Some((key, engine.clone()));
+        Ok(engine)
     }
 }
 
@@ -135,7 +180,29 @@ fn finish_recording(app: AppHandle, state: Arc<SpokeState>) {
                 emit_state(&app, "idle", None);
             }
         }
+        // Per-run scratch (resampled audio, whisper KV-cache state, base64
+        // buffers) is freed by now, but glibc keeps it in its arenas rather than
+        // returning it to the OS, so RSS ratchets up after each transcription.
+        // Force the freed pages back to the OS so memory stays flat.
+        release_heap();
     });
+}
+
+/// Return freed heap pages to the OS. glibc's allocator caches freed blocks in
+/// per-thread arenas indefinitely; `malloc_trim` releases the top of the heap
+/// back to the kernel so RSS drops after each transcription instead of climbing.
+/// No-op on non-glibc targets (musl, macOS, Windows).
+fn release_heap() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        extern "C" {
+            fn malloc_trim(pad: usize) -> i32;
+        }
+        // Safety: malloc_trim is always safe to call; it only frees unused heap.
+        unsafe {
+            malloc_trim(0);
+        }
+    }
 }
 
 async fn run_pipeline(state: &Arc<SpokeState>) -> anyhow::Result<()> {
@@ -162,10 +229,16 @@ async fn run_pipeline(state: &Arc<SpokeState>) -> anyhow::Result<()> {
         ));
     }
 
-    let engine = stt::SttEngine::from_config(&cfg)?;
+    // Raw recording (interleaved samples at device rate) is no longer needed once
+    // downmixed; drop it before transcription so it isn't resident during inference.
+    let sample_rate = rec.sample_rate;
+    drop(rec);
+
+    let engine = state.engine(&cfg)?;
     let transcript = engine
-        .transcribe(&mono, rec.sample_rate, &cfg.general.language)
+        .transcribe(&mono, sample_rate, &cfg.general.language)
         .await?;
+    drop(mono);
 
     let transcript = transcript.trim().to_string();
     if transcript.is_empty() {
@@ -219,6 +292,7 @@ pub fn run() {
         config: Mutex::new(config),
         audio,
         recording: AtomicBool::new(false),
+        engine: Mutex::new(None),
     });
 
     tauri::Builder::default()

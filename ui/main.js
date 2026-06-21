@@ -56,6 +56,17 @@ let toState    = 'idle';
 let transP     = 1;
 const TRANS_DUR = 0.55;
 
+// Reused per-frame color buffers (see drawMosaic) — module-level to avoid
+// allocating on every animation frame.
+const bbg = [0, 0, 0];
+const bfg = [0, 0, 0];
+
+// Idle ambient animation is throttled to this rate; listening/processing run at
+// full refresh for audio-reactive smoothness. Continuous 60fps full-canvas
+// redraws when idle are the main driver of WebKit web-process memory/CPU.
+const IDLE_INTERVAL = 1000 / 20;
+let lastFrame = 0;
+
 // ---- Panel close ---------------------------------------------------------
 
 // On Wayland, WebKitGTK does not re-commit a transparent, unfocused window's
@@ -300,19 +311,17 @@ function drawMosaic(now) {
     ? 2 * transP * transP
     : -1 + (4 - 2 * transP) * transP;
 
-  // Blend palettes once per frame
+  // Blend palettes once per frame. Reuse module-level arrays (bbg/bfg) instead
+  // of allocating two new arrays every frame — avoids GC churn that inflates the
+  // WebKit web process heap under the continuous animation loop.
   const pF = MOSAIC_PALETTES[fromState];
   const pT = MOSAIC_PALETTES[toState];
-  const bbg = [
-    pF.bg[0] + (pT.bg[0] - pF.bg[0]) * ease,
-    pF.bg[1] + (pT.bg[1] - pF.bg[1]) * ease,
-    pF.bg[2] + (pT.bg[2] - pF.bg[2]) * ease,
-  ];
-  const bfg = [
-    pF.fg[0] + (pT.fg[0] - pF.fg[0]) * ease,
-    pF.fg[1] + (pT.fg[1] - pF.fg[1]) * ease,
-    pF.fg[2] + (pT.fg[2] - pF.fg[2]) * ease,
-  ];
+  bbg[0] = pF.bg[0] + (pT.bg[0] - pF.bg[0]) * ease;
+  bbg[1] = pF.bg[1] + (pT.bg[1] - pF.bg[1]) * ease;
+  bbg[2] = pF.bg[2] + (pT.bg[2] - pF.bg[2]) * ease;
+  bfg[0] = pF.fg[0] + (pT.fg[0] - pF.fg[0]) * ease;
+  bfg[1] = pF.fg[1] + (pT.fg[1] - pF.fg[1]) * ease;
+  bfg[2] = pF.fg[2] + (pT.fg[2] - pF.fg[2]) * ease;
 
   mCtx.fillStyle = `rgb(${bbg[0]|0},${bbg[1]|0},${bbg[2]|0})`;
   mCtx.fillRect(0, 0, S, S);
@@ -347,8 +356,19 @@ function drawMosaic(now) {
       );
     }
   }
+}
 
-  requestAnimationFrame(drawMosaic);
+// Animation driver: always schedules the next frame, but skips the actual draw
+// when the window is hidden (occluded/minimized) and throttles to IDLE_INTERVAL
+// while idle. During state transitions and listening/processing it runs at full
+// refresh so the audio-reactive visuals stay smooth.
+function tick(now) {
+  requestAnimationFrame(tick);
+  if (document.hidden) return;
+  const idle = toState === 'idle' && transP >= 1;
+  if (idle && now - lastFrame < IDLE_INTERVAL) return;
+  lastFrame = now;
+  drawMosaic(now);
 }
 
 // ---- Events from Rust ---------------------------------------------------
@@ -434,7 +454,7 @@ async function init() {
   } catch (e) {
     flash("Failed to load config: " + e);
   }
-  requestAnimationFrame(drawMosaic);
+  requestAnimationFrame(tick);
 }
 
 init();
