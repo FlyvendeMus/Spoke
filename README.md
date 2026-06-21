@@ -12,7 +12,99 @@ for the full specification.
 - STT: **Google Speech-to-Text v1** (online, default-buildable) and
   **whisper.cpp** (offline, opt-in via the `whisper` feature)
 
-## Prerequisites
+## Build & Install — Arch Linux
+
+### 1. System dependencies
+
+```sh
+sudo pacman -S --needed \
+    base-devel curl wget git \
+    webkit2gtk-4.1 gtk3 libappindicator-gtk3 librsvg \
+    openssl pkgconf \
+    alsa-lib pipewire-alsa
+```
+
+For offline Whisper mode, also install:
+
+```sh
+sudo pacman -S cmake
+```
+
+### 2. Rust
+
+```sh
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source ~/.cargo/env
+```
+
+### 3. Tauri CLI
+
+```sh
+cargo install tauri-cli --version "^2"
+```
+
+### 4. Build
+
+**Online mode (Google STT):**
+```sh
+cargo tauri build
+```
+
+**Offline mode (local Whisper):**
+```sh
+cargo tauri build --features whisper
+```
+
+With GPU acceleration (pick one):
+```sh
+cargo tauri build --features whisper,cuda    # NVIDIA
+cargo tauri build --features whisper,vulkan  # AMD/Intel
+```
+
+Build output: `src-tauri/target/release/bundle/`
+
+### 5. Install
+
+```sh
+# Binary
+sudo install -Dm755 src-tauri/target/release/bundle/deb/Spoke_0.1.0_amd64/data/usr/bin/spoke \
+    /usr/local/bin/spoke
+
+# App launcher (.desktop)
+sudo install -Dm644 src-tauri/target/release/bundle/deb/Spoke_0.1.0_amd64/data/usr/share/applications/Spoke.desktop \
+    /usr/share/applications/Spoke.desktop
+
+# Icons
+sudo install -Dm644 src-tauri/target/release/bundle/deb/Spoke_0.1.0_amd64/data/usr/share/icons/hicolor/256x256@2/apps/spoke.png \
+    /usr/share/icons/hicolor/256x256/apps/spoke.png
+sudo install -Dm644 src-tauri/target/release/bundle/deb/Spoke_0.1.0_amd64/data/usr/share/icons/hicolor/128x128/apps/spoke.png \
+    /usr/share/icons/hicolor/128x128/apps/spoke.png
+sudo install -Dm644 src-tauri/target/release/bundle/deb/Spoke_0.1.0_amd64/data/usr/share/icons/hicolor/32x32/apps/spoke.png \
+    /usr/share/icons/hicolor/32x32/apps/spoke.png
+
+# Refresh icon cache
+sudo gtk-update-icon-cache -f /usr/share/icons/hicolor/
+```
+
+Spoke now appears in your application launcher and runs as `spoke` from the terminal.
+
+### Wayland note
+
+Global hotkeys and text injection work best on X11. On Wayland (e.g. Hyprland, sway), hotkeys require a compositor that supports `zwp_virtual_keyboard_v1`. If the hotkey doesn't register, launch with:
+
+```sh
+GDK_BACKEND=x11 spoke
+```
+
+### Offline model setup (Whisper builds only)
+
+Download a ggml model into `src-tauri/models/` before building, or place it at
+`~/.config/spoke/models/ggml-<name>.bin` at runtime. The model name must match
+the `model` field in `~/.config/spoke/spoke.toml`.
+
+---
+
+## Prerequisites (other platforms)
 
 - Rust (stable) — https://rustup.rs
 - The Tauri CLI:
