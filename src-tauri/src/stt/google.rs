@@ -33,6 +33,8 @@ impl GoogleStt {
         sample_rate: u32,
         language: &str,
     ) -> Result<String> {
+        let stripped = audio::strip_internal_silence(mono, sample_rate);
+        let mono = if stripped.is_empty() { mono } else { &stripped };
         let pcm = audio::mono_to_pcm16_le(mono);
         let content = base64::engine::general_purpose::STANDARD.encode(&pcm);
 

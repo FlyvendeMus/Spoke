@@ -39,7 +39,7 @@ impl WhisperStt {
     /// async executor's core threads.
     pub fn transcribe(&self, mono: &[f32], sample_rate: u32, language: &str) -> Result<String> {
         let audio = audio::resample_mono(mono, sample_rate, WHISPER_RATE);
-        let audio = audio::trim_silence(&audio, WHISPER_RATE);
+        let audio = audio::strip_internal_silence(&audio, WHISPER_RATE);
 
         let mut state = self
             .ctx

@@ -200,43 +200,73 @@ pub fn resample_mono(mono: &[f32], from_rate: u32, target_rate: u32) -> Vec<f32>
     out
 }
 
-/// Trim leading and trailing silence from mono audio using an RMS energy threshold.
-/// Frames with RMS ≤ 0.01 are considered silence. Operates in 30 ms windows to
-/// avoid cutting off plosives or very brief pauses.
-pub fn trim_silence(mono: &[f32], sample_rate: u32) -> Vec<f32> {
-    let threshold = 0.01;
-    let frame = (sample_rate as usize * 30) / 1000; // 30 ms
-    if mono.len() < frame * 2 {
+/// Aggressively strip silence from mono audio to reduce STT hallucinations.
+///
+/// Algorithm:
+/// 1. Classify 20 ms frames as speech (RMS > threshold) or silence.
+/// 2. Dilate each speech frame by 50 ms pre-roll / 100 ms post-roll to avoid
+///    clipping plosives and trailing phonemes.
+/// 3. Clip the output to [first_speech_sample, last_speech_sample].
+/// 4. Within that range, compress any silence run longer than 300 ms down to
+///    300 ms — keeps natural rhythm without feeding long dead air to the model.
+///
+/// Returns an empty Vec when no speech is detected.
+pub fn strip_internal_silence(mono: &[f32], sample_rate: u32) -> Vec<f32> {
+    const THRESHOLD: f32 = 0.015;
+    const FRAME_MS: usize = 20;
+    const MAX_SILENCE_MS: usize = 300;
+    const PRE_ROLL_MS: usize = 50;
+    const POST_ROLL_MS: usize = 100;
+
+    let frame_len = (sample_rate as usize * FRAME_MS) / 1000;
+    let max_silence_len = (sample_rate as usize * MAX_SILENCE_MS) / 1000;
+    let pre_roll = (sample_rate as usize * PRE_ROLL_MS) / 1000;
+    let post_roll = (sample_rate as usize * POST_ROLL_MS) / 1000;
+
+    if mono.len() < frame_len * 2 {
         return mono.to_vec();
     }
 
     let rms = |chunk: &[f32]| -> f32 {
-        let sum_sq: f32 = chunk.iter().map(|s| s * s).sum();
-        (sum_sq / chunk.len() as f32).sqrt()
+        let sq: f32 = chunk.iter().map(|s| s * s).sum();
+        (sq / chunk.len() as f32).sqrt()
     };
 
-    let start = mono
-        .chunks(frame)
-        .position(|c| rms(c) > threshold)
-        .unwrap_or(0)
-        * frame;
-
-    let end = {
-        let mut pos = mono.len();
-        for c in mono.rchunks(frame) {
-            if rms(c) > threshold {
-                break;
-            }
-            pos = pos.saturating_sub(c.len());
+    // Per-sample speech mask, dilated by pre/post roll.
+    let mut speech = vec![false; mono.len()];
+    let n_frames = mono.len() / frame_len;
+    for i in 0..n_frames {
+        let s = i * frame_len;
+        let e = (s + frame_len).min(mono.len());
+        if rms(&mono[s..e]) > THRESHOLD {
+            let lo = s.saturating_sub(pre_roll);
+            let hi = (e + post_roll).min(mono.len());
+            speech[lo..hi].iter_mut().for_each(|x| *x = true);
         }
-        pos
-    };
-
-    if start < end {
-        mono[start..end].to_vec()
-    } else {
-        mono.to_vec()
     }
+
+    let first = match speech.iter().position(|&x| x) {
+        Some(i) => i,
+        None => return Vec::new(),
+    };
+    let last = speech.iter().rposition(|&x| x).unwrap() + 1;
+
+    // Copy speech; compress silence runs that exceed max_silence_len.
+    let mut out = Vec::with_capacity(last - first);
+    let mut silence_run = 0usize;
+    for i in first..last {
+        if speech[i] {
+            silence_run = 0;
+            out.push(mono[i]);
+        } else {
+            if silence_run < max_silence_len {
+                out.push(mono[i]);
+            }
+            silence_run += 1;
+        }
+    }
+
+    out
 }
 
 /// Convert mono `f32` (`-1.0..=1.0`) to little-endian 16-bit PCM bytes.
@@ -304,5 +334,52 @@ mod tests {
         assert_eq!(i16::from_le_bytes([bytes[0], bytes[1]]), i16::MAX);
         assert_eq!(i16::from_le_bytes([bytes[2], bytes[3]]), -i16::MAX);
         assert_eq!(i16::from_le_bytes([bytes[4], bytes[5]]), 0);
+    }
+
+    #[test]
+    fn strip_silence_removes_pure_silence() {
+        // 1 second of silence at 16 kHz → no speech detected → empty output.
+        let silence = vec![0.0f32; 16_000];
+        let out = strip_internal_silence(&silence, 16_000);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn strip_silence_preserves_speech() {
+        // 0.5 s silence, 0.5 s loud speech, 0.5 s silence.
+        let rate = 16_000u32;
+        let half = rate as usize / 2;
+        let mut audio = vec![0.0f32; half];
+        audio.extend(vec![0.5f32; half]); // speech above threshold
+        audio.extend(vec![0.0f32; half]);
+        let out = strip_internal_silence(&audio, rate);
+        // Output must contain the speech samples (plus padding); all zeros trimmed.
+        assert!(!out.is_empty());
+        assert!(out.len() < audio.len()); // silence stripped
+        assert!(out.iter().any(|&s| s > 0.1));
+    }
+
+    #[test]
+    fn strip_silence_compresses_long_internal_pause() {
+        // 0.2 s speech, 1 s silence, 0.2 s speech — the pause should be compressed.
+        let rate = 16_000u32;
+        let speech_len = (rate as usize * 200) / 1000;
+        let pause_len = rate as usize; // 1 second
+        let mut audio = vec![0.5f32; speech_len];
+        audio.extend(vec![0.0f32; pause_len]);
+        audio.extend(vec![0.5f32; speech_len]);
+        let out = strip_internal_silence(&audio, rate);
+        // 1 s pause compressed to ≤ 300 ms; total shorter than input.
+        assert!(out.len() < audio.len());
+        // Still contains both speech bursts.
+        assert!(out.iter().any(|&s| s > 0.1));
+    }
+
+    #[test]
+    fn strip_silence_short_audio_passthrough() {
+        // Audio shorter than 2 frames → returned unchanged.
+        let tiny = vec![0.5f32; 10];
+        let out = strip_internal_silence(&tiny, 16_000);
+        assert_eq!(out, tiny);
     }
 }
