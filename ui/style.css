@@ -1,10 +1,10 @@
 :root {
-  --bg: #0b0b0d;
-  --bg-soft: #15151a;
-  --border: #26262e;
-  --text: #e7e7ea;
-  --muted: #8a8a93;
-  --accent: #5b8cff;
+  --bg: #08080c;
+  --bg-soft: #0a0a10;
+  --border: #1a1a22;
+  --text: #b8b8c4;
+  --muted: #555560;
+  --accent: #8264ff;
   --rec: #ff4d4d;
   --bubble: 48px;
 }
@@ -19,7 +19,7 @@ body {
   height: 100%;
   background: transparent;
   overflow: hidden;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-family: ui-monospace, Consolas, "Courier New", monospace;
   color: var(--text);
   user-select: none;
 }
@@ -32,7 +32,8 @@ body {
   display: flex;
   flex-direction: column;
   align-items: flex-end;
-  gap: 10px;
+  gap: 6px;
+  background: transparent;
 }
 
 /* ---- Bubble ---- */
@@ -97,15 +98,14 @@ body {
 
 /* ---- Settings panel ---- */
 #panel {
-  width: 280px;
+  width: 268px;
   background: var(--bg-soft);
   border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 12px 14px;
-  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.5);
-  font-size: 13px;
-  max-height: calc(100vh - 90px);
-  overflow-y: auto;
+  border-radius: 0;
+  padding: 6px 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.8);
+  font-size: 11px;
+  font-family: ui-monospace, Consolas, "Courier New", monospace;
 }
 #panel.hidden {
   display: none;
@@ -115,18 +115,30 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
-  min-height: 30px;
+  gap: 8px;
+  min-height: 24px;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--border);
+}
+.panel-row:last-of-type {
+  border-bottom: none;
 }
 .panel-title {
-  font-weight: 600;
-  font-size: 14px;
-  margin-bottom: 6px;
+  font-weight: 700;
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: 0;
+  border-bottom: 1px solid var(--border);
 }
 
 .panel-row label {
   color: var(--muted);
   white-space: nowrap;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
 }
 
 #panel select {
@@ -135,15 +147,16 @@ body {
   background: var(--bg);
   color: var(--text);
   border: 1px solid var(--border);
-  border-radius: 7px;
-  padding: 5px 20px 5px 8px;
-  font-size: 12px;
-  max-width: 160px;
+  border-radius: 0;
+  padding: 3px 16px 3px 6px;
+  font-size: 11px;
+  font-family: ui-monospace, Consolas, "Courier New", monospace;
+  max-width: 155px;
   outline: none;
   cursor: pointer;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='6'%3E%3Cpath d='M0 0h8L4 6z' fill='%238a8a93'/%3E%3C/svg%3E");
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='6' height='5'%3E%3Cpath d='M0 0h6L3 5z' fill='%23555560'/%3E%3C/svg%3E");
   background-repeat: no-repeat;
-  background-position: right 6px center;
+  background-position: right 5px center;
 }
 
 #panel select option {
@@ -156,10 +169,11 @@ body {
   background: var(--bg);
   color: var(--text);
   border: 1px solid var(--border);
-  border-radius: 7px;
-  padding: 5px 8px;
-  font-size: 12px;
-  max-width: 160px;
+  border-radius: 0;
+  padding: 3px 6px;
+  font-size: 11px;
+  font-family: ui-monospace, Consolas, "Courier New", monospace;
+  max-width: 155px;
   outline: none;
 }
 #panel select:focus,
@@ -169,17 +183,18 @@ body {
 
 #panel input[type="checkbox"] {
   accent-color: var(--accent);
-  width: 16px;
-  height: 16px;
+  width: 13px;
+  height: 13px;
 }
 
 .muted {
   color: var(--muted);
 }
 .status {
-  margin: 8px 0 0;
-  min-height: 14px;
-  font-size: 11px;
+  margin: 4px 0 0;
+  min-height: 12px;
+  font-size: 10px;
+  color: var(--muted);
 }
 
 /* Mode-dependent rows toggled from JS. */
@@ -196,29 +211,32 @@ body {
 .hotkey-ctl {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 5px;
 }
 .hotkey-display {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 12px;
+  font-family: ui-monospace, Consolas, "Courier New", monospace;
+  font-size: 11px;
   color: var(--text);
   background: var(--bg);
   border: 1px solid var(--border);
-  border-radius: 7px;
-  padding: 4px 8px;
-  min-width: 90px;
+  border-radius: 0;
+  padding: 2px 6px;
+  min-width: 80px;
   text-align: center;
 }
 .mini-btn {
   background: var(--bg);
-  color: var(--text);
+  color: var(--muted);
   border: 1px solid var(--border);
-  border-radius: 7px;
-  padding: 4px 9px;
-  font-size: 11px;
+  border-radius: 0;
+  padding: 2px 7px;
+  font-size: 10px;
+  font-family: ui-monospace, Consolas, "Courier New", monospace;
+  letter-spacing: 0.05em;
   cursor: pointer;
 }
 .mini-btn:hover {
+  color: var(--text);
   border-color: var(--accent);
 }
 /* While capturing a new shortcut. */
