@@ -49,6 +49,7 @@ body {
   cursor: pointer;
   padding: 0;
   opacity: 0.75;
+  overflow: hidden;
   transition: opacity 0.2s ease, color 0.2s ease, box-shadow 0.2s ease;
 }
 #bubble:hover {
@@ -140,7 +141,28 @@ body {
   white-space: nowrap;
 }
 
-#panel select,
+#panel select {
+  -webkit-appearance: none;
+  appearance: none;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 5px 20px 5px 8px;
+  font-size: 12px;
+  max-width: 160px;
+  outline: none;
+  cursor: pointer;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='6'%3E%3Cpath d='M0 0h8L4 6z' fill='%238a8a93'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 6px center;
+}
+
+#panel select option {
+  background: var(--bg);
+  color: var(--text);
+}
+
 #panel input[type="text"],
 #panel input[type="password"] {
   background: var(--bg);

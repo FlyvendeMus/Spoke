@@ -59,12 +59,14 @@ impl WhisperStt {
             .full(params, &audio)
             .map_err(|e| anyhow!("whisper inference failed: {e}"))?;
 
-        let segments = state.full_n_segments().map_err(|e| anyhow!("{e}"))?;
+        let segments = state.full_n_segments();
         let mut out = String::new();
         for i in 0..segments {
-            if let Ok(text) = state.full_get_segment_text(i) {
-                out.push_str(text.trim());
-                out.push(' ');
+            if let Some(segment) = state.get_segment(i) {
+                if let Ok(text) = segment.to_str() {
+                    out.push_str(text.trim());
+                    out.push(' ');
+                }
             }
         }
         Ok(out.trim().to_string())

@@ -12,6 +12,51 @@ use cpal::SampleFormat;
 use std::sync::mpsc::{Receiver, Sender, SyncSender};
 use std::sync::{Arc, Mutex};
 
+/// List all available input device names.
+///
+/// ALSA device enumeration can block indefinitely on systems with misconfigured
+/// audio (e.g. JACK/OSS backends that refuse to open), so this runs on a
+/// dedicated thread with a hard timeout and returns whatever we got if the
+/// timeout fires.
+pub fn list_input_devices() -> Vec<String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let host = cpal::default_host();
+        let mut names: Vec<String> = Vec::new();
+        if let Ok(devices) = host.input_devices() {
+            for d in devices {
+                if let Ok(n) = d.name() {
+                    if cfg!(target_os = "linux") && !is_useful_linux_device(&n) {
+                        continue;
+                    }
+                    names.push(n);
+                }
+            }
+        }
+        let _ = tx.send(names);
+    });
+    rx.recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap_or_default()
+}
+
+/// On Linux/ALSA, filter out internal pseudo-devices that are never useful
+/// to end users (hw:, plughw:, dmix:, dsnoop:, etc.).  These devices cause
+/// screenfuls of ALSA error spam and can't be opened on PipeWire systems.
+#[cfg(target_os = "linux")]
+fn is_useful_linux_device(name: &str) -> bool {
+    const BAD_PREFIXES: &[&str] = &[
+        "hw:", "plughw:", "dsnoop:", "dmix:", "plug:", "sysdefault:", "iec958:",
+        "upmix:", "vdownmix:", "surround",
+    ];
+    const BAD_EXACT: &[&str] = &["null", "pipewire-jack"];
+    !BAD_PREFIXES.iter().any(|p| name.starts_with(p)) && !BAD_EXACT.contains(&name)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn is_useful_linux_device(_name: &str) -> bool {
+    true
+}
+
 /// Raw captured audio: interleaved `f32` samples at the device's native rate.
 #[derive(Debug, Clone)]
 pub struct Recording {
@@ -21,7 +66,8 @@ pub struct Recording {
 }
 
 enum Cmd {
-    Start,
+    /// Start recording with an optional device name (empty = default).
+    Start(String),
     /// Stop and send the captured recording back.
     Stop(SyncSender<Result<Recording>>),
 }
@@ -43,8 +89,12 @@ impl AudioEngine {
         Self { tx }
     }
 
-    pub fn start(&self) -> Result<()> {
-        self.tx.send(Cmd::Start).map_err(|_| anyhow!("audio thread gone"))
+    /// Request the audio thread to start recording.  `device` is an optional
+    /// device name; pass an empty string to use the system default.
+    pub fn start(&self, device: &str) -> Result<()> {
+        self.tx
+            .send(Cmd::Start(device.to_string()))
+            .map_err(|_| anyhow!("audio thread gone"))
     }
 
     /// Stop recording and return the captured PCM (blocks until the thread replies).
@@ -58,16 +108,15 @@ impl AudioEngine {
 }
 
 fn audio_thread(rx: Receiver<Cmd>, amp_tx: Sender<f32>) {
-    // Active capture state: the live stream plus the shared sample buffer.
     let mut active: Option<(cpal::Stream, Arc<Mutex<Vec<f32>>>, u32, u16)> = None;
 
     while let Ok(cmd) = rx.recv() {
         match cmd {
-            Cmd::Start => {
+            Cmd::Start(device) => {
                 if active.is_some() {
-                    continue; // already recording
+                    continue;
                 }
-                match open_stream(amp_tx.clone()) {
+                match open_stream(&device, amp_tx.clone()) {
                     Ok(state) => {
                         if let Err(e) = state.0.play() {
                             eprintln!("[audio] failed to start stream: {e}");
@@ -81,7 +130,7 @@ fn audio_thread(rx: Receiver<Cmd>, amp_tx: Sender<f32>) {
             Cmd::Stop(reply) => {
                 let result = match active.take() {
                     Some((stream, buf, sample_rate, channels)) => {
-                        drop(stream); // stop capturing
+                        drop(stream);
                         let samples = std::mem::take(&mut *buf.lock().unwrap());
                         Ok(Recording {
                             samples,
@@ -98,73 +147,138 @@ fn audio_thread(rx: Receiver<Cmd>, amp_tx: Sender<f32>) {
 }
 
 fn open_stream(
+    device_name: &str,
     amp_tx: Sender<f32>,
 ) -> Result<(cpal::Stream, Arc<Mutex<Vec<f32>>>, u32, u16)> {
     let host = cpal::default_host();
-    let device = host
-        .default_input_device()
-        .ok_or_else(|| anyhow!("no input device"))?;
-    let config = device.default_input_config()?;
-    let sample_rate = config.sample_rate().0;
-    let channels = config.channels();
-    let buffer = Arc::new(Mutex::new(Vec::<f32>::new()));
+    let mut tried_devices: Vec<String> = Vec::new();
 
-    let err_fn = |e| eprintln!("[audio] stream error: {e}");
+    // Collect candidate devices: if a specific device was requested, try it
+    // first; then the default; then all others as fallback.
+    let mut candidates: Vec<cpal::Device> = Vec::new();
+    if !device_name.is_empty() {
+        if let Ok(devices) = host.input_devices() {
+            for d in devices {
+                if d.name().ok().as_deref() == Some(device_name) {
+                    candidates.push(d);
+                    break;
+                }
+            }
+        }
+    }
+    if let Some(d) = host.default_input_device() {
+        if !candidates.iter().any(|c| c.name().ok() == d.name().ok()) {
+            candidates.push(d);
+        }
+    }
+    // On Linux, enumerating every ALSA pseudo-device floods stderr with JACK/OSS/dmix
+    // errors and never succeeds on PipeWire systems.  Only try the known-good names.
+    #[cfg(target_os = "linux")]
+    {
+        let linux_prio = ["pulse", "pipewire", "default"];
+        if let Ok(devices) = host.input_devices() {
+            for d in devices {
+                let n = d.name().unwrap_or_default();
+                if linux_prio.contains(&n.as_str())
+                    && !candidates.iter().any(|c| c.name().ok().as_deref() == Some(&n))
+                {
+                    candidates.push(d);
+                }
+            }
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    if let Ok(devices) = host.input_devices() {
+        for d in devices {
+            if !candidates.iter().any(|c| c.name().ok() == d.name().ok()) {
+                candidates.push(d);
+            }
+        }
+    }
 
-    // One callback factory regardless of the device's native sample format:
-    // everything is converted to f32 and appended to the shared buffer.
-    let buf = buffer.clone();
-    let push = move |data: &[f32]| {
-        // RMS amplitude for the UI ring.
-        if !data.is_empty() {
-            let sum_sq: f32 = data.iter().map(|s| s * s).sum();
-            let rms = (sum_sq / data.len() as f32).sqrt();
-            let _ = amp_tx.send(rms.clamp(0.0, 1.0));
-        }
-        buf.lock().unwrap().extend_from_slice(data);
-    };
+    for device in &candidates {
+        let name = device.name().unwrap_or_else(|_| "(unknown)".into());
+        tried_devices.push(name.clone());
+        let config = match device.default_input_config() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("[audio] {name}: skipping (bad config: {e})");
+                continue;
+            }
+        };
+        let sample_rate = config.sample_rate().0;
+        let channels = config.channels();
+        let buffer = Arc::new(Mutex::new(Vec::<f32>::new()));
 
-    let stream = match config.sample_format() {
-        SampleFormat::F32 => {
-            let push = push;
-            device.build_input_stream(
-                &config.into(),
-                move |d: &[f32], _| push(d),
-                err_fn,
-                None,
-            )?
-        }
-        SampleFormat::I16 => {
-            let push = push;
-            device.build_input_stream(
-                &config.into(),
-                move |d: &[i16], _| {
-                    let f: Vec<f32> = d.iter().map(|&s| s as f32 / i16::MAX as f32).collect();
-                    push(&f)
-                },
-                err_fn,
-                None,
-            )?
-        }
-        SampleFormat::U16 => {
-            let push = push;
-            device.build_input_stream(
-                &config.into(),
-                move |d: &[u16], _| {
-                    let f: Vec<f32> = d
-                        .iter()
-                        .map(|&s| (s as f32 / u16::MAX as f32) * 2.0 - 1.0)
-                        .collect();
-                    push(&f)
-                },
-                err_fn,
-                None,
-            )?
-        }
-        other => return Err(anyhow!("unsupported sample format: {other:?}")),
-    };
+        let err_fn = |e| eprintln!("[audio] stream error: {e}");
 
-    Ok((stream, buffer, sample_rate, channels))
+        let buf = buffer.clone();
+        let tx = amp_tx.clone();
+        let push_fn = move |data: &[f32]| {
+            if !data.is_empty() {
+                let sum_sq: f32 = data.iter().map(|s| s * s).sum();
+                let rms = (sum_sq / data.len() as f32).sqrt();
+                let _ = tx.send(rms.clamp(0.0, 1.0));
+            }
+            buf.lock().unwrap().extend_from_slice(data);
+        };
+
+        let result = match config.sample_format() {
+            SampleFormat::F32 => {
+                let push = push_fn;
+                device.build_input_stream(
+                    &config.into(),
+                    move |d: &[f32], _| push(d),
+                    err_fn,
+                    None,
+                )
+            }
+            SampleFormat::I16 => {
+                let push = push_fn;
+                device.build_input_stream(
+                    &config.into(),
+                    move |d: &[i16], _| {
+                        let f: Vec<f32> =
+                            d.iter().map(|&s| s as f32 / i16::MAX as f32).collect();
+                        push(&f)
+                    },
+                    err_fn,
+                    None,
+                )
+            }
+            SampleFormat::U16 => {
+                let push = push_fn;
+                device.build_input_stream(
+                    &config.into(),
+                    move |d: &[u16], _| {
+                        let f: Vec<f32> = d
+                            .iter()
+                            .map(|&s| (s as f32 / u16::MAX as f32) * 2.0 - 1.0)
+                            .collect();
+                        push(&f)
+                    },
+                    err_fn,
+                    None,
+                )
+            }
+            other => {
+                eprintln!("[audio] {name}: unsupported format {other:?}");
+                continue;
+            }
+        };
+
+        match result {
+            Ok(stream) => return Ok((stream, buffer, sample_rate, channels)),
+            Err(e) => {
+                eprintln!("[audio] {name}: failed to open ({e})");
+            }
+        }
+    }
+
+    Err(anyhow!(
+        "no usable input device (tried: {})",
+        tried_devices.join(", ")
+    ))
 }
 
 /// Downmix interleaved audio to a single mono channel by averaging.

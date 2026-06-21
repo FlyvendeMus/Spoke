@@ -14,6 +14,7 @@
         <header class="panel-row panel-title">
           <span>Spoke</span>
           <span id="version" class="muted">v0.1.0</span>
+          <button id="closePanel" type="button" class="mini-btn" style="margin-left:auto">&times;</button>
         </header>
 
         <div class="panel-row">
@@ -77,6 +78,11 @@
         <div class="panel-row save-path-row">
           <label for="savePath">Save path</label>
           <input id="savePath" type="text" spellcheck="false" />
+        </div>
+
+        <div class="panel-row">
+          <label for="micDevice">Microphone</label>
+          <select id="micDevice"></select>
         </div>
 
         <p id="status" class="muted status"></p>

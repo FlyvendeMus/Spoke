@@ -59,6 +59,11 @@ fn set_config(
 }
 
 #[tauri::command]
+fn list_audio_devices() -> Vec<String> {
+    audio::list_input_devices()
+}
+
+#[tauri::command]
 fn start_recording(app: AppHandle, state: State<'_, Arc<SpokeState>>) {
     begin_recording(&app, state.inner());
 }
@@ -74,13 +79,39 @@ fn is_recording(state: State<'_, Arc<SpokeState>>) -> bool {
     state.recording.load(Ordering::SeqCst)
 }
 
+/// Force the bubble window to present its current content.
+///
+/// On Wayland, WebKitGTK never re-commits a transparent, unfocused window's
+/// surface on content change, so toggling the settings panel updates the DOM but
+/// not the pixels until an unrelated ~20s refresh. A real window resize triggers a
+/// surface reconfigure + commit, which is the only reliable way to present the new
+/// frame. We flip the width by 1px (oscillating, so it never drifts and the
+/// compositor can't coalesce it away); the change is imperceptible.
+#[tauri::command]
+fn nudge_repaint(app: AppHandle) {
+    #[cfg(target_os = "linux")]
+    if let Some(win) = app.get_webview_window("bubble") {
+        if let Ok(size) = win.outer_size() {
+            let width = if size.width % 2 == 0 {
+                size.width + 1
+            } else {
+                size.width - 1
+            };
+            let _ = win.set_size(tauri::PhysicalSize::new(width, size.height));
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = app;
+}
+
 // ---- Recording lifecycle --------------------------------------------------
 
 fn begin_recording(app: &AppHandle, state: &Arc<SpokeState>) {
     if state.recording.swap(true, Ordering::SeqCst) {
         return; // already recording
     }
-    if let Err(e) = state.audio.start() {
+    let device = state.config_snapshot().recording.input_device.clone();
+    if let Err(e) = state.audio.start(&device) {
         state.recording.store(false, Ordering::SeqCst);
         emit_state(app, "error", Some(e.to_string()));
         return;
@@ -126,7 +157,9 @@ async fn run_pipeline(state: &Arc<SpokeState>) -> anyhow::Result<()> {
 
     let mono = audio::to_mono(&rec.samples, rec.channels);
     if mono.is_empty() {
-        return Ok(());
+        return Err(anyhow::anyhow!(
+            "No audio captured – check microphone permissions and device selection"
+        ));
     }
 
     let engine = stt::SttEngine::from_config(&cfg)?;
@@ -138,6 +171,8 @@ async fn run_pipeline(state: &Arc<SpokeState>) -> anyhow::Result<()> {
     if transcript.is_empty() {
         return Ok(());
     }
+
+    println!("[spoke] transcript: {transcript}");
 
     // enigo is not Send; run it on a blocking thread.
     tokio::task::spawn_blocking(move || inject::inject_text(&transcript))
@@ -161,6 +196,19 @@ fn register_hotkey(app: &AppHandle, cfg: &Config) -> anyhow::Result<()> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // WEBKIT_DISABLE_COMPOSITING_MODE=1 is required on Linux to prevent WebKitGTK
+    // from using GPU compositing, which on many setups causes the window to render
+    // blank or invisible.  Trade-off: some visual rendering artifacts.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
+        if std::env::var("GDK_BACKEND").is_err() {
+            if std::env::var("WAYLAND_DISPLAY").is_ok() {
+                std::env::set_var("GDK_BACKEND", "wayland,x11");
+            }
+        }
+    }
+
     let config = Config::load().unwrap_or_default();
 
     // Audio amplitude channel: capture thread → UI events.
@@ -181,7 +229,9 @@ pub fn run() {
             set_config,
             start_recording,
             stop_recording,
-            is_recording
+            is_recording,
+            list_audio_devices,
+            nudge_repaint
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -203,9 +253,14 @@ pub fn run() {
             build_tray(app)?;
             position_bubble(&handle);
 
-            // Keep the bubble visible when the user switches Spaces on macOS.
-            #[cfg(target_os = "macos")]
             if let Some(win) = handle.get_webview_window("bubble") {
+                // Ensure the window receives pointer (mouse) events. On Linux,
+                // transparent windows with decorations=false may default to
+                // ignoring cursor events, making clicks pass through silently.
+                let _ = win.set_ignore_cursor_events(false);
+
+                // Keep the bubble visible when the user switches Spaces on macOS.
+                #[cfg(target_os = "macos")]
                 let _ = win.set_visible_on_all_workspaces(true);
             }
 

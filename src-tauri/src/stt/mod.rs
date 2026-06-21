@@ -11,7 +11,7 @@ mod whisper;
 pub use google::GoogleStt;
 
 use crate::config::{Config, Mode};
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 
 /// A ready-to-use transcription backend.
 pub enum SttEngine {
@@ -34,7 +34,7 @@ impl SttEngine {
                 #[cfg(not(feature = "whisper"))]
                 {
                     let _ = cfg;
-                    Err(anyhow!(
+                    Err(anyhow::anyhow!(
                         "offline mode requires building with `--features whisper`"
                     ))
                 }

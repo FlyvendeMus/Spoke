@@ -98,6 +98,8 @@ pub struct Recording {
     pub save_audio: bool,
     pub save_path: String,
     pub format: AudioFormat,
+    /// Name of the input device to use. Empty means default.
+    pub input_device: String,
 }
 
 impl Default for Recording {
@@ -106,6 +108,7 @@ impl Default for Recording {
             save_audio: false,
             save_path: "~/Documents/Spoke".into(),
             format: AudioFormat::Wav,
+            input_device: String::new(),
         }
     }
 }

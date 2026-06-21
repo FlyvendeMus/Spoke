@@ -1,4 +1,3 @@
-// Vanilla bridge to the Rust core via Tauri's global API (withGlobalTauri).
 const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
 const appWindow = window.__TAURI__.window.getCurrentWindow();
@@ -11,8 +10,8 @@ const ring = $("ring");
 const status = $("status");
 const hotkeyDisplay = $("hotkey");
 const recordBtn = $("recordHotkey");
+const closeBtn = $("closePanel");
 
-// Form fields that map 1:1 to config and auto-save on change.
 const fields = {
   mode: $("mode"),
   trigger: $("trigger"),
@@ -21,12 +20,49 @@ const fields = {
   apikey: $("apikey"),
   saveAudio: $("saveAudio"),
   savePath: $("savePath"),
+  micDevice: $("micDevice"),
 };
 
-// Local copy of the config; mutated by the UI and pushed back on change.
 let config = null;
 let amplitude = 0;
 let recording = false;
+
+// ---- Panel close ---------------------------------------------------------
+
+// On Wayland, WebKitGTK does not re-commit a transparent, unfocused window's
+// surface on content change, so the panel's DOM state flips but the pixels do not
+// update until an unrelated ~20s refresh. `nudge_repaint` resizes the window by
+// 1px, forcing a surface reconfigure + commit that presents the new frame.
+function closePanel() {
+  panel.classList.add("hidden");
+  invoke("nudge_repaint");
+}
+
+function openPanel() {
+  panel.classList.remove("hidden");
+  invoke("nudge_repaint");
+}
+
+// Use pointerdown (fires before click) for reliability on Linux/GTK.
+closeBtn.addEventListener("pointerdown", (e) => {
+  e.stopPropagation();
+  e.preventDefault();
+  closePanel();
+});
+
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !panel.classList.contains("hidden")) {
+    closePanel();
+  }
+});
+
+// Close panel when clicking outside both the panel and the bubble.
+document.addEventListener("pointerdown", (e) => {
+  if (panel.classList.contains("hidden")) return;
+  if (!panel.contains(e.target) && !bubble.contains(e.target)) {
+    closePanel();
+  }
+});
 
 // ---- Config <-> form ----------------------------------------------------
 
@@ -38,12 +74,14 @@ function formFromConfig(c) {
   fields.apikey.value = c.online.api_key;
   fields.saveAudio.checked = c.recording.save_audio;
   fields.savePath.value = c.recording.save_path;
+  if (c.recording.input_device && fields.micDevice.querySelector(`option[value="${c.recording.input_device}"]`)) {
+    fields.micDevice.value = c.recording.input_device;
+  }
   hotkeyDisplay.textContent = c.general.hotkey || "—";
   applyModeVisibility(c.general.mode);
 }
 
 function configFromForm() {
-  // Clone so we keep fields the UI doesn't expose (e.g. ui.* and use_gpu).
   const c = structuredClone(config);
   c.general.mode = fields.mode.value;
   c.general.trigger = fields.trigger.value;
@@ -52,7 +90,7 @@ function configFromForm() {
   c.online.api_key = fields.apikey.value;
   c.recording.save_audio = fields.saveAudio.checked;
   c.recording.save_path = fields.savePath.value.trim();
-  // Hotkey is managed by the recorder, not a form field.
+  c.recording.input_device = fields.micDevice.value;
   c.general.hotkey = config.general.hotkey;
   return c;
 }
@@ -85,9 +123,30 @@ function flash(msg) {
   flashTimer = setTimeout(() => (status.textContent = ""), 2500);
 }
 
+// ---- Microphone device list ---------------------------------------------
+
+async function populateMicDevices() {
+  try {
+    const devices = await invoke("list_audio_devices");
+    const sel = fields.micDevice;
+    sel.innerHTML = "";
+    const def = document.createElement("option");
+    def.value = "";
+    def.textContent = "Default";
+    sel.appendChild(def);
+    for (const d of devices) {
+      const opt = document.createElement("option");
+      opt.value = d;
+      opt.textContent = d;
+      sel.appendChild(opt);
+    }
+  } catch (e) {
+    console.error("Failed to list audio devices:", e);
+  }
+}
+
 // ---- Hotkey recorder ----------------------------------------------------
 
-// Map a KeyboardEvent.code to the token our Rust parser understands.
 function keyName(code) {
   if (/^Key[A-Z]$/.test(code)) return code.slice(3).toLowerCase();
   if (/^Digit[0-9]$/.test(code)) return code.slice(5);
@@ -109,7 +168,7 @@ function comboFromEvent(e) {
   if (e.altKey) mods.push("alt");
   if (e.shiftKey) mods.push("shift");
   const key = keyName(e.code);
-  if (!key) return null; // a modifier was pressed alone — keep waiting
+  if (!key) return null;
   return [...mods, key].join("+");
 }
 
@@ -136,11 +195,11 @@ async function onCaptureKey(e) {
   e.preventDefault();
   e.stopPropagation();
   if (e.key === "Escape" && !e.metaKey && !e.ctrlKey && !e.altKey) {
-    endCapture(); // cancel
+    endCapture();
     return;
   }
   const combo = comboFromEvent(e);
-  if (!combo) return; // modifier-only, wait for the real key
+  if (!combo) return;
   config.general.hotkey = combo;
   hotkeyDisplay.textContent = combo;
   endCapture();
@@ -155,7 +214,6 @@ recordBtn.addEventListener("click", (e) => {
 // ---- Bubble state -------------------------------------------------------
 
 function setBubbleState(state, message) {
-  // Preserve a transient `dragging` class across state swaps.
   const wasDragging = bubble.classList.contains("dragging");
   bubble.className = state;
   if (wasDragging) bubble.classList.add("dragging");
@@ -163,7 +221,6 @@ function setBubbleState(state, message) {
   if (state === "error" && message) flash(message);
 }
 
-// Amplitude ring drawn on canvas; decays smoothly when input is quiet.
 function drawRing() {
   const ctx = ring.getContext("2d");
   const w = ring.width;
@@ -177,7 +234,7 @@ function drawRing() {
     ctx.strokeStyle = `rgba(255, 77, 77, ${0.25 + amplitude * 0.6})`;
     ctx.lineWidth = 2;
     ctx.stroke();
-    amplitude *= 0.9; // decay until the next sample arrives
+    amplitude *= 0.9;
   }
   requestAnimationFrame(drawRing);
 }
@@ -190,24 +247,29 @@ listen("spoke:state", (e) => {
 });
 
 listen("spoke:amplitude", (e) => {
-  // Light non-linear boost so quiet speech still moves the ring.
   amplitude = Math.min(1, Math.sqrt(e.payload) * 1.6);
 });
 
 // ---- Dragging the bubble ------------------------------------------------
-// Distinguish a click (toggle panel) from a drag (move window): start the OS
-// drag only after the pointer travels a few pixels, then suppress the click.
 
 let dragOrigin = null;
 let didDrag = false;
+let micDevicesPopulated = false;
 
-bubble.addEventListener("mousedown", (e) => {
+// Use one event model (Pointer Events) for both drag and toggle. Mixing mouse
+// events for drag with pointer events for the toggle desyncs on WebKitGTK
+// transparent/unfocused windows: mouseup may not fire, leaving dragOrigin/didDrag
+// stale so the toggle's `if (didDrag) return` swallows the close.
+bubble.addEventListener("pointerdown", (e) => {
   if (e.button !== 0) return;
+  // Stop propagation so the document "close on outside click" handler does not
+  // run when the user clicks the bubble itself — toggle is handled below.
+  e.stopPropagation();
   dragOrigin = { x: e.screenX, y: e.screenY };
   didDrag = false;
 });
 
-window.addEventListener("mousemove", (e) => {
+window.addEventListener("pointermove", (e) => {
   if (!dragOrigin) return;
   const dx = e.screenX - dragOrigin.x;
   const dy = e.screenY - dragOrigin.y;
@@ -219,17 +281,32 @@ window.addEventListener("mousemove", (e) => {
   }
 });
 
-window.addEventListener("mouseup", () => {
+bubble.addEventListener("pointerup", (e) => {
+  if (e.button !== 0) return;
+  // Always reset drag state on release so it can never go stale.
   dragOrigin = null;
   bubble.classList.remove("dragging");
-});
-
-bubble.addEventListener("click", () => {
   if (didDrag) {
     didDrag = false;
-    return; // it was a drag, not a click
+    return;
   }
-  panel.classList.toggle("hidden");
+  if (panel.classList.contains("hidden")) {
+    openPanel();
+    if (!micDevicesPopulated) {
+      micDevicesPopulated = true;
+      populateMicDevices();
+    }
+  } else {
+    closePanel();
+  }
+});
+
+// Safety net: if startDragging() swallows the pointerup (WM grabs the gesture),
+// clear drag state when the pointer leaves so the next click is never blocked.
+window.addEventListener("pointercancel", () => {
+  dragOrigin = null;
+  didDrag = false;
+  bubble.classList.remove("dragging");
 });
 
 // ---- Form wiring + boot -------------------------------------------------

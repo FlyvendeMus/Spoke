@@ -42,7 +42,7 @@ thiserror = "2"
 dirs = "5"
 
 # Offline STT — heavy native build (whisper.cpp + cmake). Opt in with `--features whisper`.
-whisper-rs = { version = "0.11", optional = true }
+whisper-rs = { version = "0.16", optional = true }
 
 [features]
 default = []
