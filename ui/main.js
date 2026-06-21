@@ -27,6 +27,35 @@ let config = null;
 let amplitude = 0;
 let recording = false;
 
+// ── Mosaic canvas setup ───────────────────────────────────────────────────
+const S   = 48;
+const dpr = Math.min(window.devicePixelRatio || 1, 2);
+ring.width  = S * dpr;
+ring.height = S * dpr;
+const mCtx  = ring.getContext('2d');
+mCtx.scale(dpr, dpr);
+
+const COLS = 13;
+const ROWS = 13;
+const cellW = S / COLS;
+const cellH = S / ROWS;
+const GAP   = 1.2;
+
+const MOSAIC_PALETTES = {
+  idle:       { bg: [16, 10, 44],  fg: [130, 100, 255] },
+  listening:  { bg: [44, 10, 22],  fg: [255, 108,  75] },
+  processing: { bg: [ 8, 32, 44],  fg: [ 38, 212, 196] },
+};
+
+let mosaicT    = 0;
+let mosaicPrev = performance.now();
+let smoothedAmp = 0;
+
+let fromState  = 'idle';
+let toState    = 'idle';
+let transP     = 1;
+const TRANS_DUR = 0.55;
+
 // ---- Panel close ---------------------------------------------------------
 
 // On Wayland, WebKitGTK does not re-commit a transparent, unfocused window's
@@ -221,22 +250,105 @@ function setBubbleState(state, message) {
   if (state === "error" && message) flash(message);
 }
 
-function drawRing() {
-  const ctx = ring.getContext("2d");
-  const w = ring.width;
-  const h = ring.height;
-  ctx.clearRect(0, 0, w, h);
-  if (recording) {
-    const base = w * 0.38;
-    const radius = base + amplitude * (w * 0.5 - base);
-    ctx.beginPath();
-    ctx.arc(w / 2, h / 2, radius, 0, Math.PI * 2);
-    ctx.strokeStyle = `rgba(255, 77, 77, ${0.25 + amplitude * 0.6})`;
-    ctx.lineWidth = 2;
-    ctx.stroke();
-    amplitude *= 0.9;
+function waveV(state, nx, ny, dist, angle, hash, col) {
+  if (state === 'idle') {
+    return 0.22
+      + 0.18 * Math.sin(mosaicT * 0.55 + nx * 4.0 + ny * 2.5 + hash * 1.5)
+      + 0.08 * Math.sin(mosaicT * 0.40 + nx * 1.5 - ny * 3.0 + hash * 2.0);
+  } else if (state === 'listening') {
+    const r1    = Math.sin(mosaicT * 2.8  - dist * 4.5);
+    const r2    = Math.sin(mosaicT * 3.10 - dist * 5.5 + 2.1);
+    const flick = Math.abs(Math.sin(mosaicT * 5.5 + col * 1.1))
+                * Math.max(0, 1 - dist * 1.6) * 0.10;
+    const bloom = smoothedAmp * Math.max(0, 1 - dist * 1.8) * 0.55;
+    return 0.08
+      + Math.max(0, r1) * (0.42 + smoothedAmp * 0.22)
+      + Math.max(0, r2) * (0.24 + smoothedAmp * 0.14)
+      + flick
+      + bloom;
+  } else {
+    const wA = Math.sin(mosaicT * 1.6 + angle * 3 + dist * 6);
+    const wB = Math.sin(mosaicT * 2.4 - dist * 8  + angle * 2);
+    return 0.10
+      + (wA * 0.5 + 0.5) * 0.38
+      + (wB * 0.5 + 0.5) * 0.30;
   }
-  requestAnimationFrame(drawRing);
+}
+
+function drawMosaic(now) {
+  const dt   = Math.min((now - mosaicPrev) / 1000, 0.05);
+  mosaicT   += dt;
+  mosaicPrev = now;
+
+  // Envelope follower: fast attack (~100ms), slow release (~800ms)
+  smoothedAmp += (amplitude - smoothedAmp) * (amplitude > smoothedAmp ? 0.20 : 0.04);
+  amplitude   *= 0.9;
+
+  // Detect state change → start transition
+  const ms = bubble.classList.contains('recording') ? 'listening'
+           : bubble.classList.contains('processing') ? 'processing'
+           : 'idle';
+  if (ms !== toState) {
+    fromState = toState;
+    toState   = ms;
+    transP    = 0;
+  }
+
+  // Advance + ease transition progress
+  if (transP < 1) transP = Math.min(1, transP + dt / TRANS_DUR);
+  const ease = transP < 0.5
+    ? 2 * transP * transP
+    : -1 + (4 - 2 * transP) * transP;
+
+  // Blend palettes once per frame
+  const pF = MOSAIC_PALETTES[fromState];
+  const pT = MOSAIC_PALETTES[toState];
+  const bbg = [
+    pF.bg[0] + (pT.bg[0] - pF.bg[0]) * ease,
+    pF.bg[1] + (pT.bg[1] - pF.bg[1]) * ease,
+    pF.bg[2] + (pT.bg[2] - pF.bg[2]) * ease,
+  ];
+  const bfg = [
+    pF.fg[0] + (pT.fg[0] - pF.fg[0]) * ease,
+    pF.fg[1] + (pT.fg[1] - pF.fg[1]) * ease,
+    pF.fg[2] + (pT.fg[2] - pF.fg[2]) * ease,
+  ];
+
+  mCtx.fillStyle = `rgb(${bbg[0]|0},${bbg[1]|0},${bbg[2]|0})`;
+  mCtx.fillRect(0, 0, S, S);
+
+  for (let row = 0; row < ROWS; row++) {
+    for (let col = 0; col < COLS; col++) {
+      const nx    = col / (COLS - 1);
+      const ny    = row / (ROWS - 1);
+      const dx    = nx - 0.5;
+      const dy    = ny - 0.5;
+      const dist  = Math.sqrt(dx * dx + dy * dy) * Math.SQRT2;
+      const angle = Math.atan2(dy, dx);
+      const hash  = ((col * 7 + row * 13) % 31) / 31;
+
+      const vF = Math.min(1, Math.max(0, waveV(fromState, nx, ny, dist, angle, hash, col)));
+      const vT = Math.min(1, Math.max(0, waveV(toState,   nx, ny, dist, angle, hash, col)));
+      const v  = vF + (vT - vF) * ease;
+
+      const ir = Math.round(bbg[0] + (bfg[0] - bbg[0]) * v);
+      const ig = Math.round(bbg[1] + (bfg[1] - bbg[1]) * v);
+      const ib = Math.round(bbg[2] + (bfg[2] - bbg[2]) * v);
+
+      const sz = 0.68 + v * 0.32;
+      const cw = (cellW - GAP) * sz;
+      const ch = (cellH - GAP) * sz;
+
+      mCtx.fillStyle = `rgb(${ir},${ig},${ib})`;
+      mCtx.fillRect(
+        col * cellW + GAP / 2 + (cellW - GAP - cw) / 2,
+        row * cellH + GAP / 2 + (cellH - GAP - ch) / 2,
+        cw, ch
+      );
+    }
+  }
+
+  requestAnimationFrame(drawMosaic);
 }
 
 // ---- Events from Rust ---------------------------------------------------
@@ -322,7 +434,7 @@ async function init() {
   } catch (e) {
     flash("Failed to load config: " + e);
   }
-  requestAnimationFrame(drawRing);
+  requestAnimationFrame(drawMosaic);
 }
 
 init();

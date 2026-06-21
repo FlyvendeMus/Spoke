@@ -41,16 +41,15 @@ body {
   width: var(--bubble);
   height: var(--bubble);
   border-radius: 50%;
-  border: 1px solid var(--border);
-  background: var(--bg);
-  color: var(--muted);
+  border: none;
+  background: rgb(16, 10, 44);
   display: grid;
   place-items: center;
   cursor: pointer;
   padding: 0;
-  opacity: 0.75;
+  opacity: 0.85;
   overflow: hidden;
-  transition: opacity 0.2s ease, color 0.2s ease, box-shadow 0.2s ease;
+  transition: opacity 0.2s ease, box-shadow 0.2s ease;
 }
 #bubble:hover {
   opacity: 1;
@@ -72,39 +71,28 @@ body {
 
 /* States */
 #bubble.idle {
-  opacity: 0.75;
+  opacity: 0.85;
+}
+#bubble.idle .mic {
+  color: rgba(130, 100, 255, 0.55);
 }
 #bubble.recording {
   opacity: 1;
-  color: var(--rec);
-  box-shadow: 0 0 0 2px rgba(255, 77, 77, 0.25), 0 0 18px rgba(255, 77, 77, 0.5);
-  animation: pulse 1.4s ease-in-out infinite;
+}
+#bubble.recording .mic {
+  color: rgba(255, 108, 75, 0.9);
 }
 #bubble.processing {
   opacity: 1;
-  color: var(--accent);
 }
 #bubble.processing .mic {
-  animation: spin 0.9s linear infinite;
+  color: rgba(38, 212, 196, 0.85);
 }
 #bubble.error {
   opacity: 1;
+}
+#bubble.error .mic {
   color: #ffb020;
-}
-
-@keyframes pulse {
-  0%,
-  100% {
-    box-shadow: 0 0 0 2px rgba(255, 77, 77, 0.25), 0 0 14px rgba(255, 77, 77, 0.4);
-  }
-  50% {
-    box-shadow: 0 0 0 3px rgba(255, 77, 77, 0.4), 0 0 22px rgba(255, 77, 77, 0.7);
-  }
-}
-@keyframes spin {
-  to {
-    transform: rotate(360deg);
-  }
 }
 
 /* ---- Settings panel ---- */
