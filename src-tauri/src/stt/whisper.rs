@@ -39,7 +39,11 @@ impl WhisperStt {
     /// async executor's core threads.
     pub fn transcribe(&self, mono: &[f32], sample_rate: u32, language: &str) -> Result<String> {
         let audio = audio::resample_mono(mono, sample_rate, WHISPER_RATE);
-        let audio = audio::strip_internal_silence(&audio, WHISPER_RATE);
+        let mut audio = audio::strip_internal_silence(&audio, WHISPER_RATE);
+        // Whisper's decoder truncates the last segment when audio ends mid-speech.
+        // Appending 500 ms of silence gives it room to finalize the last tokens.
+        let pad = WHISPER_RATE as usize / 2;
+        audio.extend(std::iter::repeat(0.0f32).take(pad));
 
         let mut state = self
             .ctx

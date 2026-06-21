@@ -330,7 +330,7 @@ pub fn strip_internal_silence(mono: &[f32], sample_rate: u32) -> Vec<f32> {
     const FRAME_MS: usize = 20;
     const MAX_SILENCE_MS: usize = 300;
     const PRE_ROLL_MS: usize = 50;
-    const POST_ROLL_MS: usize = 100;
+    const POST_ROLL_MS: usize = 200;
 
     let frame_len = (sample_rate as usize * FRAME_MS) / 1000;
     let max_silence_len = (sample_rate as usize * MAX_SILENCE_MS) / 1000;
