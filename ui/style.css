@@ -253,3 +253,48 @@ body {
 #bubble.dragging {
   cursor: grabbing;
 }
+
+/* ---- Model download controls ---- */
+.model-ctl {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.model-status {
+  font-size: 11px;
+  min-width: 36px;
+  text-align: center;
+  font-family: ui-monospace, Consolas, "Courier New", monospace;
+}
+.model-status.installed {
+  color: #34d399;
+}
+.model-status.downloading {
+  color: var(--accent);
+}
+.model-status.error {
+  color: #ff4d4d;
+}
+
+/* ---- Acceleration badge ---- */
+.accel-badge {
+  font-size: 10px;
+  font-family: ui-monospace, Consolas, "Courier New", monospace;
+  letter-spacing: 0.05em;
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+.accel-badge[data-accel="Metal"],
+.accel-badge[data-accel="CoreML"] {
+  color: #34d399;
+  border-color: #34d39944;
+}
+.accel-badge[data-accel="CUDA"],
+.accel-badge[data-accel="Vulkan"] {
+  color: #60a5fa;
+  border-color: #60a5fa44;
+}
+.accel-badge[data-accel="CPU"] {
+  color: var(--muted);
+}

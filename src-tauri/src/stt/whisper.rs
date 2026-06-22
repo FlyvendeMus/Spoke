@@ -1,8 +1,9 @@
 //! Offline STT via whisper.cpp (whisper-rs bindings).
 //!
 //! Compiled only with the `whisper` cargo feature. The model file is expected
-//! at `src-tauri/models/ggml-<model>.bin` (download separately — large). Audio
-//! is resampled to 16 kHz mono, which whisper.cpp requires.
+//! at `src-tauri/models/ggml-<model>.bin` or in the runtime config directory
+//! (`~/.config/spoke/models/` on Linux, `~/Library/Application Support/spoke/models/`
+//! on macOS). Audio is resampled to 16 kHz mono, which whisper.cpp requires.
 
 use crate::audio;
 use crate::config::Config;
@@ -18,15 +19,10 @@ pub struct WhisperStt {
 
 impl WhisperStt {
     pub fn from_config(cfg: &Config) -> Result<Self> {
-        let path = model_path(&cfg.offline.model);
-        if !path.exists() {
-            return Err(anyhow!(
-                "whisper model not found at {} (download it first)",
-                path.display()
-            ));
-        }
+        let path = resolve_model_path(&cfg.offline.model)
+            .ok_or_else(|| anyhow!("whisper model '{}' not found (download it first)", cfg.offline.model))?;
         let mut params = WhisperContextParameters::default();
-        params.use_gpu(cfg.offline.use_gpu);
+        params.use_gpu(wants_gpu(cfg));
         let ctx = WhisperContext::new_with_params(
             path.to_str().ok_or_else(|| anyhow!("bad model path"))?,
             params,
@@ -77,8 +73,69 @@ impl WhisperStt {
     }
 }
 
-/// Resolve the model file path relative to the crate's `models` directory.
-fn model_path(model: &str) -> PathBuf {
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("models");
-    dir.join(format!("ggml-{model}.bin"))
+/// Resolve whether GPU should be enabled given the current config and build.
+/// On macOS, `mac_accel` takes precedence. "none" always disables GPU.
+fn wants_gpu(cfg: &crate::config::Config) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        cfg.offline.mac_accel != "none"
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        cfg.offline.use_gpu
+    }
+}
+
+/// Hugging Face URL for a whisper.cpp ggml model.
+pub fn model_download_url(model: &str) -> String {
+    format!("https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-{model}.bin")
+}
+
+/// Hugging Face URL for the CoreML encoder bundle zip.
+#[cfg(feature = "coreml")]
+pub fn coreml_bundle_url(model: &str) -> String {
+    format!("https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-{model}-encoder.mlmodelc.zip")
+}
+
+/// Path where the CoreML bundle lives, co-located with the GGML model file.
+/// Falls back to the runtime models dir if the GGML model hasn't been downloaded yet.
+#[cfg(feature = "coreml")]
+pub fn coreml_bundle_path(model: &str) -> PathBuf {
+    let bundle_name = format!("ggml-{model}-encoder.mlmodelc");
+    if let Some(model_path) = resolve_model_path(model) {
+        if let Some(parent) = model_path.parent() {
+            return parent.join(&bundle_name);
+        }
+    }
+    models_dir().join(bundle_name)
+}
+
+#[cfg(feature = "coreml")]
+pub fn coreml_bundle_exists(model: &str) -> bool {
+    coreml_bundle_path(model).exists()
+}
+
+/// Runtime directory where downloaded models are stored (under the OS config dir).
+pub fn models_dir() -> PathBuf {
+    let base = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
+    base.join("spoke").join("models")
+}
+
+/// Check whether the given model file exists in either the build or runtime dir.
+pub fn model_exists(model: &str) -> bool {
+    resolve_model_path(model).is_some()
+}
+
+/// Resolve the model path checking the build dir first, then the runtime dir.
+pub fn resolve_model_path(model: &str) -> Option<PathBuf> {
+    let name = format!("ggml-{model}.bin");
+    let build = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("models").join(&name);
+    if build.exists() {
+        return Some(build);
+    }
+    let runtime = models_dir().join(&name);
+    if runtime.exists() {
+        return Some(runtime);
+    }
+    None
 }

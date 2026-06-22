@@ -63,6 +63,9 @@ pub struct Offline {
     /// "tiny" | "base" | "small" | "large-v3-turbo"
     pub model: String,
     pub use_gpu: bool,
+    /// macOS acceleration: "auto" | "metal" | "coreml" | "none".
+    /// Ignored on non-macOS (use_gpu governs instead).
+    pub mac_accel: String,
 }
 
 impl Default for Offline {
@@ -70,6 +73,7 @@ impl Default for Offline {
         Self {
             model: "large-v3-turbo".into(),
             use_gpu: true,
+            mac_accel: "auto".into(),
         }
     }
 }
@@ -98,6 +102,9 @@ pub struct Recording {
     pub save_audio: bool,
     pub save_path: String,
     pub format: AudioFormat,
+    /// When true, save the processed (mono, silence-stripped, 16kHz) audio instead
+    /// of the raw multi-channel recording.
+    pub save_processed: bool,
     /// Name of the input device to use. Empty means default.
     pub input_device: String,
 }
@@ -108,6 +115,7 @@ impl Default for Recording {
             save_audio: false,
             save_path: "~/Documents/Spoke".into(),
             format: AudioFormat::Wav,
+            save_processed: false,
             input_device: String::new(),
         }
     }

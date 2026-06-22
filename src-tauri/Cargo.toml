@@ -30,11 +30,17 @@ hound = "3.5"
 enigo = "0.2"
 
 # Online STT (Google Cloud Speech-to-Text v2)
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 base64 = "0.22"
 
 # Async runtime
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+
+# Async stream processing (model download)
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+
+# Zip extraction (CoreML bundle download)
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 # Misc
 anyhow = "1"
@@ -48,6 +54,13 @@ whisper-rs = { version = "0.16", optional = true }
 default = []
 # Enable local Whisper transcription. Requires cmake + a C/C++ toolchain.
 whisper = ["dep:whisper-rs"]
+# Apple Silicon GPU acceleration via Metal. Enable alongside `whisper`, e.g.
+# `--features whisper,metal`. Requires macOS 10.13+ and Xcode command-line tools.
+metal = ["whisper", "whisper-rs/metal"]
+# Apple Neural Engine acceleration via CoreML. The encoder bundle is downloaded
+# automatically at runtime (see in-app Download button). Faster than Metal on
+# audio >3s; encoder runs on the Apple Neural Engine.
+coreml = ["whisper", "whisper-rs/coreml"]
 # NVIDIA GPU acceleration for Whisper. Requires the CUDA toolkit (nvcc) at build
 # time. Enable alongside `whisper`, e.g. `--features whisper,cuda`.
 cuda = ["whisper-rs/cuda"]

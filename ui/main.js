@@ -12,20 +12,27 @@ const hotkeyDisplay = $("hotkey");
 const recordBtn = $("recordHotkey");
 const closeBtn = $("closePanel");
 
+const accelBadge = $("accelBadge");
+
 const fields = {
   mode: $("mode"),
   trigger: $("trigger"),
   language: $("language"),
   model: $("model"),
+  macAccel: $("macAccel"),
   apikey: $("apikey"),
   saveAudio: $("saveAudio"),
   savePath: $("savePath"),
+  saveMode: $("saveMode"),
   micDevice: $("micDevice"),
 };
 
 let config = null;
 let amplitude = 0;
 let recording = false;
+let modelDownloading = false;
+let coremlDownloading = false;
+let buildInfo = null;
 
 // ── Mosaic canvas setup ───────────────────────────────────────────────────
 const S   = 48;
@@ -111,9 +118,11 @@ function formFromConfig(c) {
   fields.trigger.value = c.general.trigger;
   fields.language.value = c.general.language;
   fields.model.value = c.offline.model;
+  if (c.offline.mac_accel) fields.macAccel.value = c.offline.mac_accel;
   fields.apikey.value = c.online.api_key;
   fields.saveAudio.checked = c.recording.save_audio;
   fields.savePath.value = c.recording.save_path;
+  fields.saveMode.value = c.recording.save_processed ? "processed" : "original";
   if (c.recording.input_device && fields.micDevice.querySelector(`option[value="${c.recording.input_device}"]`)) {
     fields.micDevice.value = c.recording.input_device;
   }
@@ -127,9 +136,11 @@ function configFromForm() {
   c.general.trigger = fields.trigger.value;
   c.general.language = fields.language.value;
   c.offline.model = fields.model.value;
+  c.offline.mac_accel = fields.macAccel.value;
   c.online.api_key = fields.apikey.value;
   c.recording.save_audio = fields.saveAudio.checked;
   c.recording.save_path = fields.savePath.value.trim();
+  c.recording.save_processed = fields.saveMode.value === "processed";
   c.recording.input_device = fields.micDevice.value;
   c.general.hotkey = config.general.hotkey;
   return c;
@@ -444,8 +455,194 @@ window.addEventListener("pointercancel", () => {
 // ---- Form wiring + boot -------------------------------------------------
 
 for (const el of Object.values(fields)) {
-  el.addEventListener("change", pushConfig);
+  if (el.id !== "model" && el.id !== "macAccel") {
+    el.addEventListener("change", pushConfig);
+  }
 }
+
+fields.model.addEventListener("change", async () => {
+  await pushConfig();
+  if (!modelDownloading) checkCurrentModel();
+});
+
+fields.macAccel.addEventListener("change", async () => {
+  applyCoremlRowVisibility();
+  await pushConfig();
+  if (!modelDownloading) checkCurrentModel();
+});
+
+async function loadBuildInfo() {
+  try {
+    buildInfo = await invoke("get_build_info");
+    const label = buildInfo.whisper ? buildInfo.acceleration : "CPU (no whisper)";
+    accelBadge.textContent = label;
+    accelBadge.dataset.accel = buildInfo.acceleration;
+
+    // Show GPU selector on macOS whenever any GPU feature compiled in.
+    if (buildInfo.is_macos && buildInfo.mac_options && buildInfo.mac_options.length > 1) {
+      const sel = fields.macAccel;
+      const valid = new Set([...buildInfo.mac_options, "none"]);
+      // Remove options not supported by this build.
+      for (const opt of Array.from(sel.options)) {
+        if (!valid.has(opt.value)) opt.remove();
+      }
+      // Default selection: prefer metal, then coreml, else none.
+      if (!valid.has(sel.value)) {
+        sel.value = buildInfo.has_metal ? "metal" : buildInfo.has_coreml ? "coreml" : "none";
+      }
+      $("gpuRow").classList.remove("hide");
+    }
+
+    applyCoremlRowVisibility();
+  } catch (e) {
+    accelBadge.textContent = "unknown";
+  }
+}
+
+function applyCoremlRowVisibility() {
+  const show = buildInfo && buildInfo.has_coreml &&
+    (fields.macAccel.value === "coreml" || fields.macAccel.value === "auto");
+  $("coremlRow").classList.toggle("hide", !show);
+}
+
+// ---- Model download --------------------------------------------------
+
+async function checkCurrentModel() {
+  const model = fields.model.value;
+  const statusEl = $("modelStatus");
+  const dlBtn = $("downloadModel");
+  statusEl.textContent = "…";
+  statusEl.className = "model-status";
+  dlBtn.classList.add("hide");
+  try {
+    const info = await invoke("check_model", { model });
+    if (info.exists) {
+      statusEl.textContent = "✓";
+      statusEl.className = "model-status installed";
+      dlBtn.classList.add("hide");
+    } else {
+      statusEl.textContent = "—";
+      statusEl.className = "model-status";
+      dlBtn.classList.remove("hide");
+    }
+    // Update CoreML bundle status if that row is visible.
+    if (buildInfo && buildInfo.has_coreml && !$("coremlRow").classList.contains("hide")) {
+      updateCoremlStatus(info.coreml_exists);
+    }
+  } catch (_) {
+    statusEl.textContent = "—";
+    statusEl.className = "model-status";
+    dlBtn.classList.add("hide");
+  }
+}
+
+function updateCoremlStatus(exists) {
+  const statusEl = $("coremlStatus");
+  const dlBtn = $("downloadCoreml");
+  if (exists) {
+    statusEl.textContent = "✓";
+    statusEl.className = "model-status installed";
+    dlBtn.classList.add("hide");
+  } else {
+    statusEl.textContent = "—";
+    statusEl.className = "model-status";
+    dlBtn.classList.remove("hide");
+  }
+}
+
+$("downloadCoreml").addEventListener("click", async () => {
+  if (coremlDownloading) return;
+  const model = fields.model.value;
+  const statusEl = $("coremlStatus");
+  const dlBtn = $("downloadCoreml");
+  coremlDownloading = true;
+  dlBtn.disabled = true;
+  dlBtn.textContent = "…";
+  dlBtn.classList.remove("hide");
+  statusEl.textContent = "0%";
+  statusEl.className = "model-status downloading";
+  fields.model.disabled = true;
+  try {
+    await invoke("download_coreml_bundle", { model });
+  } catch (e) {
+    statusEl.textContent = "✗";
+    statusEl.className = "model-status error";
+    dlBtn.disabled = false;
+    dlBtn.textContent = "Download";
+    coremlDownloading = false;
+    fields.model.disabled = false;
+    flash(String(e));
+  }
+});
+
+listen("spoke:coreml-progress", (e) => {
+  if (!coremlDownloading) return;
+  const { model, percent, phase } = e.payload;
+  if (model !== fields.model.value) return;
+  const statusEl = $("coremlStatus");
+  statusEl.className = "model-status downloading";
+  statusEl.textContent = phase === "extract" ? "unzip…" : `${percent}%`;
+});
+
+listen("spoke:coreml-complete", (e) => {
+  if (!coremlDownloading) return;
+  const { model } = e.payload;
+  if (model === fields.model.value) {
+    updateCoremlStatus(true);
+  }
+  $("downloadCoreml").disabled = false;
+  $("downloadCoreml").textContent = "Download";
+  fields.model.disabled = false;
+  coremlDownloading = false;
+});
+
+$("downloadModel").addEventListener("click", async () => {
+  if (modelDownloading) return;
+  const model = fields.model.value;
+  const statusEl = $("modelStatus");
+  const dlBtn = $("downloadModel");
+  modelDownloading = true;
+  dlBtn.disabled = true;
+  dlBtn.textContent = "…";
+  dlBtn.classList.remove("hide");
+  statusEl.textContent = "0%";
+  statusEl.className = "model-status downloading";
+  fields.model.disabled = true;
+  try {
+    await invoke("download_model", { model });
+  } catch (e) {
+    statusEl.textContent = "✗";
+    statusEl.className = "model-status error";
+    dlBtn.disabled = false;
+    dlBtn.textContent = "Download";
+    modelDownloading = false;
+    fields.model.disabled = false;
+    flash(String(e));
+  }
+});
+
+listen("spoke:download-progress", (e) => {
+  if (!modelDownloading) return;
+  const { model, percent } = e.payload;
+  if (model === fields.model.value) {
+    $("modelStatus").textContent = `${percent}%`;
+    $("modelStatus").className = "model-status downloading";
+  }
+});
+
+listen("spoke:download-complete", (e) => {
+  if (!modelDownloading) return;
+  const { model } = e.payload;
+  if (model === fields.model.value) {
+    $("modelStatus").textContent = "✓";
+    $("modelStatus").className = "model-status installed";
+    $("downloadModel").classList.add("hide");
+  }
+  $("downloadModel").disabled = false;
+  $("downloadModel").textContent = "Download";
+  fields.model.disabled = false;
+  modelDownloading = false;
+});
 
 async function init() {
   try {
@@ -454,6 +651,8 @@ async function init() {
   } catch (e) {
     flash("Failed to load config: " + e);
   }
+  loadBuildInfo();
+  checkCurrentModel();
   requestAnimationFrame(tick);
 }
 

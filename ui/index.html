@@ -56,12 +56,35 @@
         <!-- Offline-only -->
         <div class="panel-row offline-only">
           <label for="model">Model</label>
-          <select id="model">
-            <option value="tiny">tiny</option>
-            <option value="base">base</option>
-            <option value="small">small</option>
-            <option value="large-v3-turbo">large-v3-turbo</option>
+          <div class="model-ctl">
+            <select id="model">
+              <option value="tiny">tiny</option>
+              <option value="base">base</option>
+              <option value="small">small</option>
+              <option value="large-v3-turbo">large-v3-turbo</option>
+            </select>
+            <span id="modelStatus" class="model-status" title="GGML model file">—</span>
+            <button id="downloadModel" type="button" class="mini-btn hide">Get</button>
+          </div>
+        </div>
+
+        <!-- GPU backend selector — shown by JS when GPU features compiled in -->
+        <div id="gpuRow" class="panel-row offline-only hide">
+          <label for="macAccel">Accel</label>
+          <select id="macAccel">
+            <option value="metal">Metal (GPU)</option>
+            <option value="coreml">CoreML (ANE)</option>
+            <option value="none">CPU only</option>
           </select>
+        </div>
+
+        <!-- CoreML bundle row — shown when CoreML selected -->
+        <div id="coremlRow" class="panel-row offline-only hide">
+          <label>ANE bundle</label>
+          <div class="model-ctl">
+            <span id="coremlStatus" class="model-status" title="CoreML encoder (.mlmodelc) — enables Apple Neural Engine">—</span>
+            <button id="downloadCoreml" type="button" class="mini-btn hide">Get</button>
+          </div>
         </div>
 
         <!-- Online-only -->
@@ -81,8 +104,21 @@
         </div>
 
         <div class="panel-row">
+          <label for="saveMode">Save mode</label>
+          <select id="saveMode">
+            <option value="original">Original</option>
+            <option value="processed">Processed</option>
+          </select>
+        </div>
+
+        <div class="panel-row">
           <label for="micDevice">Microphone</label>
           <select id="micDevice"></select>
+        </div>
+
+        <div class="panel-row">
+          <label>Accel</label>
+          <span id="accelBadge" class="accel-badge">—</span>
         </div>
 
         <p id="status" class="muted status"></p>

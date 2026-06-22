@@ -6,7 +6,7 @@
 
 mod google;
 #[cfg(feature = "whisper")]
-mod whisper;
+pub mod whisper;
 
 pub use google::GoogleStt;
 

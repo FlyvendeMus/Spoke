@@ -27,6 +27,7 @@ struct EngineKey {
     mode: Mode,
     model: String,
     use_gpu: bool,
+    mac_accel: String,
     provider: String,
     api_key: String,
 }
@@ -37,6 +38,7 @@ impl EngineKey {
             mode: cfg.general.mode,
             model: cfg.offline.model.clone(),
             use_gpu: cfg.offline.use_gpu,
+            mac_accel: cfg.offline.mac_accel.clone(),
             provider: cfg.online.provider.clone(),
             api_key: cfg.online.api_key.clone(),
         }
@@ -106,6 +108,204 @@ fn set_config(
 #[tauri::command]
 fn list_audio_devices() -> Vec<String> {
     audio::list_input_devices()
+}
+
+#[tauri::command]
+fn get_build_info() -> serde_json::Value {
+    // Highest-capability single label for the accel badge.
+    let acceleration = if cfg!(feature = "coreml") {
+        "CoreML"
+    } else if cfg!(feature = "metal") {
+        "Metal"
+    } else if cfg!(feature = "cuda") {
+        "CUDA"
+    } else if cfg!(feature = "vulkan") {
+        "Vulkan"
+    } else {
+        "CPU"
+    };
+
+    // Which mac_accel values are meaningful in this binary (order = UI display order).
+    let mut mac_options: Vec<&str> = vec!["none"];
+    if cfg!(feature = "metal")  { mac_options.insert(0, "metal");  }
+    if cfg!(feature = "coreml") { mac_options.insert(0, "coreml"); }
+
+    serde_json::json!({
+        "acceleration": acceleration,
+        "whisper": cfg!(feature = "whisper"),
+        "is_macos": cfg!(target_os = "macos"),
+        "mac_options": mac_options,
+        "has_metal": cfg!(feature = "metal"),
+        "has_coreml": cfg!(feature = "coreml"),
+    })
+}
+
+#[cfg(feature = "whisper")]
+#[tauri::command]
+fn check_model(model: String) -> Result<serde_json::Value, String> {
+    #[cfg(not(feature = "coreml"))]
+    return Ok(serde_json::json!({
+        "exists": stt::whisper::model_exists(&model),
+        "url": stt::whisper::model_download_url(&model),
+        "coreml_exists": false,
+    }));
+    #[cfg(feature = "coreml")]
+    Ok(serde_json::json!({
+        "exists": stt::whisper::model_exists(&model),
+        "url": stt::whisper::model_download_url(&model),
+        "coreml_exists": stt::whisper::coreml_bundle_exists(&model),
+        "coreml_url": stt::whisper::coreml_bundle_url(&model),
+    }))
+}
+
+#[cfg(feature = "coreml")]
+#[tauri::command]
+async fn download_coreml_bundle(app: AppHandle, model: String) -> Result<(), String> {
+    use futures_util::StreamExt;
+    use tokio::io::AsyncWriteExt;
+
+    let url = stt::whisper::coreml_bundle_url(&model);
+    let dest_dir = stt::whisper::models_dir();
+    std::fs::create_dir_all(&dest_dir)
+        .map_err(|e| format!("failed to create models dir: {e}"))?;
+
+    let bundle_path = dest_dir.join(format!("ggml-{model}-encoder.mlmodelc"));
+    if bundle_path.exists() {
+        let _ = app.emit("spoke:coreml-complete", serde_json::json!({ "model": model }));
+        return Ok(());
+    }
+
+    let tmp_path = dest_dir.join(format!("ggml-{model}-encoder.mlmodelc.zip.tmp"));
+
+    let client = reqwest::Client::builder()
+        .user_agent("Spoke/0.1")
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let response = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("server returned {}", response.status()));
+    }
+
+    let total = response.content_length().unwrap_or(0);
+    let mut downloaded: u64 = 0;
+    let mut file = tokio::fs::File::create(&tmp_path).await.map_err(|e| e.to_string())?;
+    let mut stream = response.bytes_stream();
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| e.to_string())?;
+        file.write_all(&chunk).await.map_err(|e| e.to_string())?;
+        downloaded += chunk.len() as u64;
+        if total > 0 {
+            let percent = (downloaded as f64 / total as f64 * 100.0) as u32;
+            let _ = app.emit("spoke:coreml-progress", serde_json::json!({
+                "model": &model,
+                "percent": percent,
+                "phase": "download",
+            }));
+        }
+    }
+    file.flush().await.map_err(|e| e.to_string())?;
+    drop(file);
+
+    // Extract on a blocking thread (zip::ZipArchive requires Seek).
+    let tmp_clone = tmp_path.clone();
+    let dest_clone = dest_dir.clone();
+    let model_clone = model.clone();
+    let app_clone = app.clone();
+
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let _ = app_clone.emit("spoke:coreml-progress", serde_json::json!({
+            "model": &model_clone,
+            "percent": 100,
+            "phase": "extract",
+        }));
+
+        let f = std::fs::File::open(&tmp_clone)
+            .map_err(|e| format!("open zip: {e}"))?;
+        let mut archive = zip::ZipArchive::new(f)
+            .map_err(|e| format!("read zip: {e}"))?;
+
+        for i in 0..archive.len() {
+            let mut entry = archive.by_index(i).map_err(|e| format!("zip entry: {e}"))?;
+            let out = dest_clone.join(entry.name());
+            // Prevent path traversal.
+            if !out.starts_with(&dest_clone) {
+                return Err(format!("unsafe zip path: {}", entry.name()));
+            }
+            if entry.is_dir() {
+                std::fs::create_dir_all(&out).map_err(|e| format!("mkdir: {e}"))?;
+            } else {
+                if let Some(p) = out.parent() {
+                    std::fs::create_dir_all(p).map_err(|e| format!("mkdir: {e}"))?;
+                }
+                let mut out_f = std::fs::File::create(&out).map_err(|e| format!("create: {e}"))?;
+                std::io::copy(&mut entry, &mut out_f).map_err(|e| format!("extract: {e}"))?;
+            }
+        }
+
+        let _ = std::fs::remove_file(&tmp_clone);
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("extraction panicked: {e}"))??;
+
+    let _ = app.emit("spoke:coreml-complete", serde_json::json!({ "model": model }));
+    Ok(())
+}
+
+#[cfg(feature = "whisper")]
+#[tauri::command]
+async fn download_model(
+    app: AppHandle,
+    model: String,
+) -> Result<(), String> {
+    use futures_util::StreamExt;
+    use tokio::io::AsyncWriteExt;
+
+    let url = stt::whisper::model_download_url(&model);
+    let dest_dir = stt::whisper::models_dir();
+    std::fs::create_dir_all(&dest_dir).map_err(|e| format!("failed to create models directory: {e}"))?;
+    let dest_path = dest_dir.join(format!("ggml-{model}.bin"));
+
+    if dest_path.exists() {
+        let _ = app.emit("spoke:download-complete", serde_json::json!({ "model": model }));
+        return Ok(());
+    }
+
+    let client = reqwest::Client::builder()
+        .user_agent("Spoke/0.1")
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let response = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("server returned {}", response.status()));
+    }
+
+    let total = response.content_length().unwrap_or(0);
+    let mut downloaded: u64 = 0;
+    let mut file = tokio::fs::File::create(&dest_path).await.map_err(|e| e.to_string())?;
+    let mut stream = response.bytes_stream();
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| e.to_string())?;
+        file.write_all(&chunk).await.map_err(|e| e.to_string())?;
+        downloaded += chunk.len() as u64;
+        if total > 0 {
+            let percent = (downloaded as f64 / total as f64 * 100.0) as u32;
+            let _ = app.emit("spoke:download-progress", serde_json::json!({
+                "model": model,
+                "downloaded": downloaded,
+                "total": total,
+                "percent": percent,
+            }));
+        }
+    }
+
+    file.flush().await.map_err(|e| e.to_string())?;
+    let _ = app.emit("spoke:download-complete", serde_json::json!({ "model": model }));
+    Ok(())
 }
 
 #[tauri::command]
@@ -209,19 +409,6 @@ async fn run_pipeline(state: &Arc<SpokeState>) -> anyhow::Result<()> {
     let cfg = state.config_snapshot();
     let rec = state.audio.stop()?;
 
-    // Optional raw audio save.
-    if cfg.recording.save_audio {
-        let dir = cfg.resolved_save_path();
-        let ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let path = dir.join(format!("spoke-{ts}.wav"));
-        if let Err(e) = audio::save_wav(&path, &rec) {
-            eprintln!("[spoke] failed to save audio: {e}");
-        }
-    }
-
     let mono = audio::to_mono(&rec.samples, rec.channels);
     if mono.is_empty() {
         return Err(anyhow::anyhow!(
@@ -229,9 +416,29 @@ async fn run_pipeline(state: &Arc<SpokeState>) -> anyhow::Result<()> {
         ));
     }
 
+    let sample_rate = rec.sample_rate;
+
+    // Optional audio save.
+    if cfg.recording.save_audio {
+        let dir = cfg.resolved_save_path();
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let path = dir.join(format!("spoke-{ts}.wav"));
+        if cfg.recording.save_processed {
+            let processed = audio::strip_internal_silence(&mono, sample_rate);
+            let processed = audio::resample_mono(&processed, sample_rate, 16000);
+            if let Err(e) = audio::save_wav_mono(&path, &processed, 16000) {
+                eprintln!("[spoke] failed to save processed audio: {e}");
+            }
+        } else if let Err(e) = audio::save_wav(&path, &rec) {
+            eprintln!("[spoke] failed to save audio: {e}");
+        }
+    }
+
     // Raw recording (interleaved samples at device rate) is no longer needed once
     // downmixed; drop it before transcription so it isn't resident during inference.
-    let sample_rate = rec.sample_rate;
     drop(rec);
 
     let engine = state.engine(&cfg)?;
@@ -305,7 +512,14 @@ pub fn run() {
             stop_recording,
             is_recording,
             list_audio_devices,
-            nudge_repaint
+            nudge_repaint,
+            get_build_info,
+            #[cfg(feature = "whisper")]
+            check_model,
+            #[cfg(feature = "whisper")]
+            download_model,
+            #[cfg(feature = "coreml")]
+            download_coreml_bundle,
         ])
         .setup(move |app| {
             let handle = app.handle().clone();

@@ -314,23 +314,28 @@ pub fn resample_mono(mono: &[f32], from_rate: u32, target_rate: u32) -> Vec<f32>
     out
 }
 
-/// Aggressively strip silence from mono audio to reduce STT hallucinations.
+/// Strip leading silence from mono audio to reduce STT hallucinations.
 ///
 /// Algorithm:
 /// 1. Classify 20 ms frames as speech (RMS > threshold) or silence.
-/// 2. Dilate each speech frame by 50 ms pre-roll / 100 ms post-roll to avoid
+/// 2. Dilate each speech frame by 50 ms pre-roll / 500 ms post-roll to avoid
 ///    clipping plosives and trailing phonemes.
-/// 3. Clip the output to [first_speech_sample, last_speech_sample].
-/// 4. Within that range, compress any silence run longer than 300 ms down to
-///    300 ms — keeps natural rhythm without feeding long dead air to the model.
+/// 3. Find the first speech sample and trim everything before it.
+/// 4. Within the remaining audio, compress any silence run longer than 300 ms
+///    down to 300 ms — keeps natural rhythm without feeding long dead air to
+///    the model.
+///
+/// The end of the audio is NOT trimmed, so trailing speech (even if quiet
+/// enough to fall below the RMS threshold) is never cut off. Any trailing
+/// silence is compressed to at most 300 ms.
 ///
 /// Returns an empty Vec when no speech is detected.
 pub fn strip_internal_silence(mono: &[f32], sample_rate: u32) -> Vec<f32> {
-    const THRESHOLD: f32 = 0.015;
+    const THRESHOLD: f32 = 0.01;
     const FRAME_MS: usize = 20;
     const MAX_SILENCE_MS: usize = 300;
     const PRE_ROLL_MS: usize = 50;
-    const POST_ROLL_MS: usize = 200;
+    const POST_ROLL_MS: usize = 500;
 
     let frame_len = (sample_rate as usize * FRAME_MS) / 1000;
     let max_silence_len = (sample_rate as usize * MAX_SILENCE_MS) / 1000;
@@ -363,12 +368,11 @@ pub fn strip_internal_silence(mono: &[f32], sample_rate: u32) -> Vec<f32> {
         Some(i) => i,
         None => return Vec::new(),
     };
-    let last = speech.iter().rposition(|&x| x).unwrap() + 1;
 
-    // Copy speech; compress silence runs that exceed max_silence_len.
-    let mut out = Vec::with_capacity(last - first);
+    // Copy from first speech to the end; compress silence runs.
+    let mut out = Vec::with_capacity(mono.len() - first);
     let mut silence_run = 0usize;
-    for i in first..last {
+    for i in first..mono.len() {
         if speech[i] {
             silence_run = 0;
             out.push(mono[i]);
@@ -406,6 +410,25 @@ pub fn save_wav(path: &std::path::Path, rec: &Recording) -> Result<()> {
     };
     let mut writer = hound::WavWriter::create(path, spec)?;
     for &s in &rec.samples {
+        writer.write_sample((s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16)?;
+    }
+    writer.finalize()?;
+    Ok(())
+}
+
+/// Write mono PCM samples to a 16-bit mono WAV file at the given sample rate.
+pub fn save_wav_mono(path: &std::path::Path, samples: &[f32], sample_rate: u32) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let spec = hound::WavSpec {
+        channels: 1,
+        sample_rate,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+    let mut writer = hound::WavWriter::create(path, spec)?;
+    for &s in samples {
         writer.write_sample((s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16)?;
     }
     writer.finalize()?;
