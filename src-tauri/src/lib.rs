@@ -9,7 +9,7 @@ mod stt;
 
 use audio::AudioEngine;
 use config::{Config, Mode, Trigger};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 use stt::SttEngine;
@@ -50,6 +50,11 @@ pub struct SpokeState {
     config: Mutex<Config>,
     audio: AudioEngine,
     recording: AtomicBool,
+    /// Monotonically increasing counter incremented each time a new recording
+    /// begins. The pipeline captures the current value when it starts and checks
+    /// it before injecting text — if a newer session has started the result is
+    /// discarded, effectively cancelling the stale in-flight transcription.
+    session: AtomicU64,
     /// Cached STT engine + the config signature it was built for. Built lazily
     /// on first transcription and reused until the relevant config changes.
     engine: Mutex<Option<(EngineKey, Arc<SttEngine>)>>,
@@ -355,6 +360,10 @@ fn begin_recording(app: &AppHandle, state: &Arc<SpokeState>) {
     if state.recording.swap(true, Ordering::SeqCst) {
         return; // already recording
     }
+    // Bump the session counter so any in-flight pipeline can detect
+    // it has been superseded and skip injecting stale text.
+    state.session.fetch_add(1, Ordering::SeqCst);
+
     let device = state.config_snapshot().recording.input_device.clone();
     if let Err(e) = state.audio.start(&device) {
         state.recording.store(false, Ordering::SeqCst);
@@ -369,10 +378,11 @@ fn finish_recording(app: AppHandle, state: Arc<SpokeState>) {
     if !state.recording.swap(false, Ordering::SeqCst) {
         return; // wasn't recording
     }
+    let session = state.session.load(Ordering::SeqCst);
     emit_state(&app, "processing", None);
 
     tauri::async_runtime::spawn(async move {
-        match run_pipeline(&state).await {
+        match run_pipeline(&state, session).await {
             Ok(_) => emit_state(&app, "idle", None),
             Err(e) => {
                 emit_state(&app, "error", Some(e.to_string()));
@@ -405,7 +415,7 @@ fn release_heap() {
     }
 }
 
-async fn run_pipeline(state: &Arc<SpokeState>) -> anyhow::Result<()> {
+async fn run_pipeline(state: &Arc<SpokeState>, session: u64) -> anyhow::Result<()> {
     let cfg = state.config_snapshot();
     let rec = state.audio.stop()?;
 
@@ -449,6 +459,12 @@ async fn run_pipeline(state: &Arc<SpokeState>) -> anyhow::Result<()> {
 
     let transcript = transcript.trim().to_string();
     if transcript.is_empty() {
+        return Ok(());
+    }
+
+    // If a new recording session has started since this pipeline was launched,
+    // discard the stale transcript instead of injecting it.
+    if state.session.load(Ordering::SeqCst) != session {
         return Ok(());
     }
 
@@ -499,6 +515,7 @@ pub fn run() {
         config: Mutex::new(config),
         audio,
         recording: AtomicBool::new(false),
+        session: AtomicU64::new(0),
         engine: Mutex::new(None),
     });
 

@@ -76,17 +76,40 @@ let lastFrame = 0;
 
 // ---- Panel close ---------------------------------------------------------
 
+// Don't import LogicalSize from @tauri-apps/api/window — use the global.
+const LOGICAL_SIZE   = window.__TAURI__.window.LogicalSize;
+const LOGICAL_POS    = window.__TAURI__.window.LogicalPosition;
+
+const PANEL_W = 300;
+const PANEL_H = 360;
+const BUBBLE_W = 80;
+const BUBBLE_H = 80;
+const MARGIN = 24;
+
+/// Keep the bubble's bottom‑right corner fixed on screen by repositioning the
+/// window after a size change.  The formulas mirror position_bubble() in Rust.
+async function resizeAndReposition(w, h) {
+  const sw = window.screen.width;
+  const sh = window.screen.height;
+  try {
+    await appWindow.setSize(new LOGICAL_SIZE(w, h));
+    await appWindow.setPosition(new LOGICAL_POS(sw - w - MARGIN, sh - h - MARGIN));
+  } catch (_) { /* best‑effort — some platforms may lack the API */ }
+}
+
 // On Wayland, WebKitGTK does not re-commit a transparent, unfocused window's
 // surface on content change, so the panel's DOM state flips but the pixels do not
 // update until an unrelated ~20s refresh. `nudge_repaint` resizes the window by
 // 1px, forcing a surface reconfigure + commit that presents the new frame.
 function closePanel() {
   panel.classList.add("hidden");
+  resizeAndReposition(BUBBLE_W, BUBBLE_H);
   invoke("nudge_repaint");
 }
 
 function openPanel() {
   panel.classList.remove("hidden");
+  resizeAndReposition(PANEL_W, PANEL_H);
   invoke("nudge_repaint");
 }
 
@@ -467,16 +490,34 @@ fields.model.addEventListener("change", async () => {
 
 fields.macAccel.addEventListener("change", async () => {
   applyCoremlRowVisibility();
+  updateAccelBadge();
   await pushConfig();
   if (!modelDownloading) checkCurrentModel();
 });
 
+function getEffectiveAccel(macAccel, buildInfo) {
+  if (!buildInfo) return "—";
+  if (macAccel === "none") return "CPU";
+  if (macAccel === "metal" && buildInfo.has_metal) return "Metal";
+  if (macAccel === "coreml" && buildInfo.has_coreml) return "CoreML";
+  if (macAccel === "auto" || !macAccel) return buildInfo.acceleration || "CPU";
+  return "CPU";
+}
+
+function updateAccelBadge() {
+  const macAccel = fields.macAccel.value;
+  const label = getEffectiveAccel(macAccel, buildInfo);
+  accelBadge.textContent = label;
+  accelBadge.dataset.accel = label;
+}
+
 async function loadBuildInfo() {
   try {
     buildInfo = await invoke("get_build_info");
-    const label = buildInfo.whisper ? buildInfo.acceleration : "CPU (no whisper)";
-    accelBadge.textContent = label;
-    accelBadge.dataset.accel = buildInfo.acceleration;
+    if (!buildInfo.whisper) {
+      accelBadge.textContent = "CPU (no whisper)";
+      accelBadge.dataset.accel = "CPU";
+    }
 
     // Show GPU selector on macOS whenever any GPU feature compiled in.
     if (buildInfo.is_macos && buildInfo.mac_options && buildInfo.mac_options.length > 1) {
@@ -494,6 +535,7 @@ async function loadBuildInfo() {
     }
 
     applyCoremlRowVisibility();
+    updateAccelBadge();
   } catch (e) {
     accelBadge.textContent = "unknown";
   }
@@ -654,6 +696,8 @@ async function init() {
   loadBuildInfo();
   checkCurrentModel();
   requestAnimationFrame(tick);
+  // Window starts at 320×320; shrink to bubble-only size immediately.
+  resizeAndReposition(BUBBLE_W, BUBBLE_H);
 }
 
 init();

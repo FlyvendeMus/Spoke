@@ -21,6 +21,25 @@ impl WhisperStt {
     pub fn from_config(cfg: &Config) -> Result<Self> {
         let path = resolve_model_path(&cfg.offline.model)
             .ok_or_else(|| anyhow!("whisper model '{}' not found (download it first)", cfg.offline.model))?;
+
+        // Toggle the CoreML bundle so whisper.cpp selects the right backend.
+        #[cfg(feature = "coreml")]
+        {
+            let bundle = coreml_bundle_path(&cfg.offline.model);
+            let mut disabled = bundle.as_os_str().to_os_string();
+            disabled.push(".disabled");
+            let disabled = PathBuf::from(disabled);
+            let use_coreml = cfg.offline.mac_accel == "coreml" || cfg.offline.mac_accel == "auto";
+
+            if use_coreml && disabled.exists() {
+                std::fs::rename(&disabled, &bundle)
+                    .map_err(|e| anyhow!("failed to restore CoreML bundle: {e}"))?;
+            } else if !use_coreml && bundle.exists() {
+                std::fs::rename(&bundle, &disabled)
+                    .map_err(|e| anyhow!("failed to disable CoreML bundle: {e}"))?;
+            }
+        }
+
         let mut params = WhisperContextParameters::default();
         params.use_gpu(wants_gpu(cfg));
         let ctx = WhisperContext::new_with_params(
