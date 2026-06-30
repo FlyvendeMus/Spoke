@@ -134,26 +134,167 @@ cargo tauri build --features whisper
 
 ---
 
-## Windows (NVIDIA GPU — CUDA)
+## Windows — Step-by-step setup
 
-**Prerequisites:**
-- CUDA Toolkit 11.8+ from developer.nvidia.com
-- Visual Studio 2022 Build Tools (MSVC)
-- CMake 3.20+
+Building on Windows requires several tools. Run each verification command to confirm the tool is on your `PATH` before proceeding.
 
-```sh
-cargo tauri build --features whisper,cuda
+### 1. Visual Studio 2022 Build Tools (MSVC)
+
+Required for Rust's MSVC target and the C/C++ compiler that whisper.cpp needs.
+
+1. Download from https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2022
+2. In the installer, select **Desktop development with C++**
+3. Under **Individual components**, ensure **Windows 10/11 SDK** is included
+4. Install and restart
+
+**Verify:**
+```powershell
+cl.exe
+```
+Should print the MSVC compiler version.
+
+---
+
+### 2. CMake
+
+Required by whisper.cpp to generate build files.
+
+1. Download from https://cmake.org/download/ (Windows x64 Installer)
+2. During install, **check "Add CMake to the system PATH"**
+3. Install and restart your terminal
+
+**Verify:**
+```powershell
+cmake --version
+```
+
+If you missed the PATH option during install, you can add it manually:
+- Add `C:\Program Files\CMake\bin` to your system or user `Path` environment variable, or
+- Run this before building (session-only):
+  ```powershell
+  $env:Path += ";C:\Program Files\CMake\bin"
+  ```
+
+---
+
+### 3. LLVM / Clang (libclang)
+
+Required by Rust's `bindgen` crate to parse C headers. Without it the build fails with:
+```
+Unable to find libclang: "couldn't find any valid shared libraries matching: ['clang.dll', 'libclang.dll']"
+```
+
+1. Download the latest LLVM release from https://github.com/llvm/llvm-project/releases (grab `LLVM-<version>-win64.exe`)
+2. Run the installer — **check "Add LLVM to the system PATH"**
+3. Install and restart your terminal
+
+**Verify:**
+```powershell
+clang --version
+```
+
+Then set the environment variable that bindgen reads:
+
+```powershell
+$env:LIBCLANG_PATH = "C:\Program Files\LLVM\bin"
+```
+
+To make this permanent, add a system/user environment variable named `LIBCLANG_PATH` with value `C:\Program Files\LLVM\bin`.
+
+---
+
+### 4. Rust (with rustfmt)
+
+```powershell
+rustup update
+rustup component add rustfmt
+```
+
+**Verify:**
+```powershell
+rustc --version
+rustfmt --version
 ```
 
 ---
 
-## Windows (CPU only)
+### 5. Tauri CLI
 
-Requires Visual Studio 2022 Build Tools + CMake:
+```powershell
+cargo install tauri-cli
+```
 
-```sh
+---
+
+### 6. Node.js
+
+Required by Tauri for webview bundling. Download from https://nodejs.org/ (18+).
+
+**Verify:**
+```powershell
+node --version
+```
+
+---
+
+### 7a. CUDA Toolkit (for NVIDIA GPU acceleration)
+
+1. Download CUDA Toolkit 11.8+ from https://developer.nvidia.com/cuda-downloads
+2. Run the installer
+3. The installer adds CUDA to your `PATH` automatically
+
+**Verify:**
+```powershell
+nvcc --version
+```
+
+> **Note:** End users do **not** need any of these build tools — they only need the NVIDIA GPU driver for CUDA-accelerated builds.
+
+---
+
+### 7b. Vulkan SDK (alternative to CUDA)
+
+If you prefer not to install CUDA, or have a non-NVIDIA GPU, use Vulkan instead:
+
+1. Download the Vulkan SDK from https://vulkan.lunang.com
+2. Install and restart
+
+```powershell
+cargo tauri build --features whisper,vulkan
+```
+
+---
+
+### Build
+
+**CUDA (NVIDIA GPU):**
+```powershell
+cargo tauri build --features whisper,cuda
+```
+
+**Vulkan (any GPU):**
+```powershell
+cargo tauri build --features whisper,vulkan
+```
+
+**CPU only:**
+```powershell
 cargo tauri build --features whisper
 ```
+
+**Dev build** (same flags, live-reload):
+```powershell
+cargo tauri dev --features whisper,cuda
+```
+
+### Troubleshooting
+
+| Error | Likely fix |
+|-------|------------|
+| `is cmake not installed?` | Install CMake and add to PATH |
+| `Unable to find libclang` | Install LLVM, set `LIBCLANG_PATH` |
+| `called Result::unwrap() on an Err value: NotPresent` (CUDA libs) | Install CUDA Toolkit or switch to `vulkan` |
+| `rustfmt.exe is not installed` | Run `rustup component add rustfmt` |
 
 ---
 
