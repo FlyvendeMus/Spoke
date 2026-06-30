@@ -29,6 +29,9 @@ hound = "3.5"
 # Text injection
 enigo = "0.2"
 
+# Clipboard access
+arboard = { version = "3", features = ["wayland-data-control"] }
+
 # Online STT (Google Cloud Speech-to-Text v2)
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 base64 = "0.22"

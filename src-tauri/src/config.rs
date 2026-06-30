@@ -35,6 +35,8 @@ pub struct General {
     pub trigger: Trigger,
     /// "auto" | BCP-47 code ("en", "da", ...).
     pub language: String,
+    /// When true, copy transcribed text to clipboard instead of injecting.
+    pub copy_to_clipboard: bool,
 }
 
 /// Platform-appropriate default hotkey: Cmd+Shift+S on macOS, Ctrl+Alt+Space elsewhere.
@@ -53,6 +55,7 @@ impl Default for General {
             hotkey: default_hotkey(),
             trigger: Trigger::PushToTalk,
             language: "auto".into(),
+            copy_to_clipboard: false,
         }
     }
 }

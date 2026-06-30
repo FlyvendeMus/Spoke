@@ -130,18 +130,14 @@ fn get_build_info() -> serde_json::Value {
         "CPU"
     };
 
-    // Which mac_accel values are meaningful in this binary (order = UI display order).
-    let mut mac_options: Vec<&str> = vec!["none"];
-    if cfg!(feature = "metal")  { mac_options.insert(0, "metal");  }
-    if cfg!(feature = "coreml") { mac_options.insert(0, "coreml"); }
-
     serde_json::json!({
         "acceleration": acceleration,
         "whisper": cfg!(feature = "whisper"),
         "is_macos": cfg!(target_os = "macos"),
-        "mac_options": mac_options,
         "has_metal": cfg!(feature = "metal"),
         "has_coreml": cfg!(feature = "coreml"),
+        "has_cuda": cfg!(feature = "cuda"),
+        "has_vulkan": cfg!(feature = "vulkan"),
     })
 }
 
@@ -381,8 +377,9 @@ fn finish_recording(app: AppHandle, state: Arc<SpokeState>) {
     let session = state.session.load(Ordering::SeqCst);
     emit_state(&app, "processing", None);
 
+    let app_clone = app.clone();
     tauri::async_runtime::spawn(async move {
-        match run_pipeline(&state, session).await {
+        match run_pipeline(&app_clone, &state, session).await {
             Ok(_) => emit_state(&app, "idle", None),
             Err(e) => {
                 emit_state(&app, "error", Some(e.to_string()));
@@ -415,7 +412,7 @@ fn release_heap() {
     }
 }
 
-async fn run_pipeline(state: &Arc<SpokeState>, session: u64) -> anyhow::Result<()> {
+async fn run_pipeline(app: &AppHandle, state: &Arc<SpokeState>, session: u64) -> anyhow::Result<()> {
     let cfg = state.config_snapshot();
     let rec = state.audio.stop()?;
 
@@ -468,12 +465,28 @@ async fn run_pipeline(state: &Arc<SpokeState>, session: u64) -> anyhow::Result<(
         return Ok(());
     }
 
-    println!("[spoke] transcript: {transcript}");
+    let copy_mode = cfg.general.copy_to_clipboard;
 
-    // enigo is not Send; run it on a blocking thread.
-    tokio::task::spawn_blocking(move || inject::inject_text(&transcript))
+    let _ = app.emit("spoke:transcript", serde_json::json!({ "text": &transcript }));
+
+    if copy_mode {
+        let text = transcript.clone();
+        tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+            let mut cb = arboard::Clipboard::new()
+                .map_err(|e| anyhow::anyhow!("clipboard init: {e}"))?;
+            cb.set_text(&text)
+                .map_err(|e| anyhow::anyhow!("clipboard set: {e}"))?;
+            println!("[spoke] copied to clipboard: {text}");
+            Ok(())
+        })
         .await
-        .map_err(|e| anyhow::anyhow!("inject task panicked: {e}"))??;
+        .map_err(|e| anyhow::anyhow!("clipboard task panicked: {e}"))??;
+    } else {
+        // enigo is not Send; run it on a blocking thread.
+        tokio::task::spawn_blocking(move || inject::inject_text(&transcript))
+            .await
+            .map_err(|e| anyhow::anyhow!("inject task panicked: {e}"))??;
+    }
 
     Ok(())
 }

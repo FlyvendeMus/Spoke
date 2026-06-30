@@ -72,11 +72,7 @@
         <!-- GPU backend selector — shown by JS when GPU features compiled in -->
         <div id="gpuRow" class="panel-row offline-only hide">
           <label for="macAccel">Accel</label>
-          <select id="macAccel">
-            <option value="metal">Metal (GPU)</option>
-            <option value="coreml">CoreML (ANE)</option>
-            <option value="none">CPU only</option>
-          </select>
+          <select id="macAccel"></select>
         </div>
 
         <!-- CoreML bundle row — shown when CoreML selected -->
@@ -115,6 +111,19 @@
         <div class="panel-row">
           <label for="micDevice">Microphone</label>
           <select id="micDevice"></select>
+        </div>
+
+        <div class="panel-row">
+          <label for="copyToClipboard">Copy to clipboard</label>
+          <input id="copyToClipboard" type="checkbox" />
+        </div>
+
+        <div class="panel-row history-header" id="historyHeader">
+          <label>History</label>
+          <button id="historyToggle" type="button" class="mini-btn" style="font-size:10px">Show</button>
+        </div>
+        <div id="historySection" class="hide">
+          <div id="historyList"></div>
         </div>
 
         <p id="status" class="muted status"></p>

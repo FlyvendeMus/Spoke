@@ -307,3 +307,47 @@ body {
 .accel-badge[data-accel="CPU"] {
   color: var(--muted);
 }
+
+/* ---- History panel ---- */
+.history-header {
+  cursor: pointer;
+}
+#historySection {
+  max-height: 180px;
+  overflow-y: auto;
+  border-bottom: 1px solid var(--border);
+}
+#historyList {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 4px 0;
+}
+.history-entry {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  font-size: 10px;
+  line-height: 1.4;
+}
+.history-text {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+.history-entry .mini-btn {
+  flex-shrink: 0;
+  font-size: 9px;
+  padding: 1px 5px;
+}
+.history-empty {
+  color: var(--muted);
+  font-size: 10px;
+  padding: 8px 6px;
+  text-align: center;
+}

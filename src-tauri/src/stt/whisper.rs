@@ -93,16 +93,10 @@ impl WhisperStt {
 }
 
 /// Resolve whether GPU should be enabled given the current config and build.
-/// On macOS, `mac_accel` takes precedence. "none" always disables GPU.
+/// "none" always disables GPU. On macOS `mac_accel` selects the backend; on Linux
+/// it selects CUDA/Vulkan if compiled in, or falls back to the default GPU backend.
 fn wants_gpu(cfg: &crate::config::Config) -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        cfg.offline.mac_accel != "none"
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        cfg.offline.use_gpu
-    }
+    cfg.offline.mac_accel != "none" && cfg.offline.use_gpu
 }
 
 /// Hugging Face URL for a whisper.cpp ggml model.

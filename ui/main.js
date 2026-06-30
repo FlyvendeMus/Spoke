@@ -25,6 +25,7 @@ const fields = {
   savePath: $("savePath"),
   saveMode: $("saveMode"),
   micDevice: $("micDevice"),
+  copyToClipboard: $("copyToClipboard"),
 };
 
 let config = null;
@@ -33,6 +34,10 @@ let recording = false;
 let modelDownloading = false;
 let coremlDownloading = false;
 let buildInfo = null;
+
+let history = [];
+const MAX_HISTORY = 50;
+let historyVisible = false;
 
 // ── Mosaic canvas setup ───────────────────────────────────────────────────
 const S   = 48;
@@ -146,6 +151,7 @@ function formFromConfig(c) {
   fields.saveAudio.checked = c.recording.save_audio;
   fields.savePath.value = c.recording.save_path;
   fields.saveMode.value = c.recording.save_processed ? "processed" : "original";
+  fields.copyToClipboard.checked = c.general.copy_to_clipboard;
   if (c.recording.input_device && fields.micDevice.querySelector(`option[value="${c.recording.input_device}"]`)) {
     fields.micDevice.value = c.recording.input_device;
   }
@@ -166,6 +172,7 @@ function configFromForm() {
   c.recording.save_processed = fields.saveMode.value === "processed";
   c.recording.input_device = fields.micDevice.value;
   c.general.hotkey = config.general.hotkey;
+  c.general.copy_to_clipboard = fields.copyToClipboard.checked;
   return c;
 }
 
@@ -416,6 +423,57 @@ listen("spoke:amplitude", (e) => {
   amplitude = Math.min(1, Math.sqrt(e.payload) * 1.6);
 });
 
+listen("spoke:transcript", (e) => {
+  const text = e.payload.text;
+  if (!text) return;
+  history.unshift({ text, time: Date.now() });
+  if (history.length > MAX_HISTORY) history.pop();
+  if (historyVisible) renderHistory();
+});
+
+async function copyToClipboard(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    flash("Copied");
+  } catch {
+    flash("Copy failed");
+  }
+}
+
+function renderHistory() {
+  const list = $("historyList");
+  list.innerHTML = "";
+  if (history.length === 0) {
+    list.innerHTML = '<div class="history-empty">No transcriptions yet</div>';
+    return;
+  }
+  for (const entry of history) {
+    const row = document.createElement("div");
+    row.className = "history-entry";
+    const label = document.createElement("span");
+    label.className = "history-text";
+    label.textContent = entry.text;
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "mini-btn";
+    btn.textContent = "Copy";
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      copyToClipboard(entry.text);
+    });
+    row.appendChild(label);
+    row.appendChild(btn);
+    list.appendChild(row);
+  }
+}
+
+$("historyToggle").addEventListener("click", () => {
+  historyVisible = !historyVisible;
+  $("historySection").classList.toggle("hide", !historyVisible);
+  $("historyToggle").textContent = historyVisible ? "Hide" : "Show";
+  if (historyVisible) renderHistory();
+});
+
 // ---- Dragging the bubble ------------------------------------------------
 
 let dragOrigin = null;
@@ -500,6 +558,8 @@ function getEffectiveAccel(macAccel, buildInfo) {
   if (macAccel === "none") return "CPU";
   if (macAccel === "metal" && buildInfo.has_metal) return "Metal";
   if (macAccel === "coreml" && buildInfo.has_coreml) return "CoreML";
+  if (macAccel === "cuda" && buildInfo.has_cuda) return "CUDA";
+  if (macAccel === "vulkan" && buildInfo.has_vulkan) return "Vulkan";
   if (macAccel === "auto" || !macAccel) return buildInfo.acceleration || "CPU";
   return "CPU";
 }
@@ -519,17 +579,30 @@ async function loadBuildInfo() {
       accelBadge.dataset.accel = "CPU";
     }
 
-    // Show GPU selector on macOS whenever any GPU feature compiled in.
-    if (buildInfo.is_macos && buildInfo.mac_options && buildInfo.mac_options.length > 1) {
+    // Build the list of GPU backends available on this platform.
+    const opts = [];
+    if (buildInfo.is_macos) {
+      if (buildInfo.has_metal) opts.push(["metal", "Metal (GPU)"]);
+      if (buildInfo.has_coreml) opts.push(["coreml", "CoreML (ANE)"]);
+    } else {
+      if (buildInfo.has_cuda) opts.push(["cuda", "CUDA (GPU)"]);
+      if (buildInfo.has_vulkan) opts.push(["vulkan", "Vulkan (GPU)"]);
+    }
+    opts.push(["none", "CPU only"]);
+
+    // Show GPU selector when there is more than just "none".
+    if (opts.length > 1) {
       const sel = fields.macAccel;
-      const valid = new Set([...buildInfo.mac_options, "none"]);
-      // Remove options not supported by this build.
-      for (const opt of Array.from(sel.options)) {
-        if (!valid.has(opt.value)) opt.remove();
+      sel.innerHTML = "";
+      for (const [val, label] of opts) {
+        const opt = document.createElement("option");
+        opt.value = val;
+        opt.textContent = label;
+        sel.appendChild(opt);
       }
-      // Default selection: prefer metal, then coreml, else none.
-      if (!valid.has(sel.value)) {
-        sel.value = buildInfo.has_metal ? "metal" : buildInfo.has_coreml ? "coreml" : "none";
+      // Default selection: prefer first non-"none" option, else "none".
+      if (!sel.value || !opts.some(([v]) => v === sel.value)) {
+        sel.value = opts.length > 1 ? opts[0][0] : "none";
       }
       $("gpuRow").classList.remove("hide");
     }
@@ -542,7 +615,7 @@ async function loadBuildInfo() {
 }
 
 function applyCoremlRowVisibility() {
-  const show = buildInfo && buildInfo.has_coreml &&
+  const show = buildInfo && buildInfo.is_macos && buildInfo.has_coreml &&
     (fields.macAccel.value === "coreml" || fields.macAccel.value === "auto");
   $("coremlRow").classList.toggle("hide", !show);
 }
