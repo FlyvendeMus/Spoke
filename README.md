@@ -1,179 +1,76 @@
-# Spoke — MVP
+# Spoke
 
-Cross-platform voice-to-text dictation for the desktop. Hold a hotkey, speak,
-release — the transcript is typed into whatever has focus. See [SPOKE.md](SPOKE.md)
-for the full specification.
+**Talk instead of type.** Hold a hotkey, say what you want to write, release — and the words appear wherever your cursor is. Any app, any text field: browsers, editors, chat, terminals.
 
-## Stack
+Spoke is a small floating bubble that lives in the corner of your screen. It works the same way on **macOS**, **Windows**, and **Linux**.
 
-- **Rust + Tauri v2** core (`src-tauri/`)
-- **Vanilla HTML/CSS/JS** UI (`ui/`) — no framework, no bundler, no Node build step
-- **cpal** capture · **enigo** injection · **global-shortcut** hotkeys
-- STT: **Google Speech-to-Text v1** (online, default-buildable) and
-  **whisper.cpp** (offline, opt-in via the `whisper` feature)
+## How it works
 
-## Build & Install — Arch Linux
+1. **Hold the hotkey** (default: `Cmd+Shift+S` on Mac, `Ctrl+Alt+Space` elsewhere) — the microphone opens.
+2. **Speak.**
+3. **Release** — a second later your words are typed into whatever has focus.
 
-### 1. System dependencies
+Prefer tap-to-start / tap-to-stop? Switch the trigger to *Toggle* in settings. Prefer the text on your clipboard instead of typed out? Turn on *Copy to clipboard*.
 
-```sh
-sudo pacman -S --needed \
-    base-devel curl wget git \
-    webkit2gtk-4.1 gtk3 libappindicator-gtk3 librsvg \
-    openssl pkgconf \
-    alsa-lib pipewire-alsa
-```
+## Private by default
 
-For offline Whisper mode, also install:
+Spoke transcribes speech **on your own computer** using [Whisper](https://github.com/ggerganov/whisper.cpp). No account, no subscription, no audio leaving your machine, works offline.
 
-```sh
-sudo pacman -S cmake
-```
+The first time you open settings, pick a model and click **Get** — Spoke downloads it for you:
 
-### 2. Rust
+| Model | Size | Good for |
+|---|---|---|
+| tiny | 75 MB | Very old or low-power machines |
+| base | 145 MB | Fast, decent accuracy |
+| small | 465 MB | Balanced |
+| large-v3-turbo | 809 MB | Best accuracy — the default |
 
-```sh
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-source ~/.cargo/env
-```
+If you'd rather use a cloud service, switch **Mode** to *Online* and paste a Google Cloud Speech-to-Text API key. Online mode is faster on weak hardware but sends audio to Google.
 
-### 3. Tauri CLI
+## Fast on every machine
 
-```sh
-cargo install tauri-cli --version "^2"
-```
+Spoke uses whatever your hardware is best at. Each build is made for one platform and ships only what that platform needs:
 
-### 4. Build
+| Platform | Acceleration |
+|---|---|
+| macOS (Apple Silicon) | Neural Engine (CoreML), GPU (Metal), or CPU |
+| Linux | NVIDIA GPU (CUDA), any GPU (Vulkan), or CPU |
+| Windows | NVIDIA GPU (CUDA), any GPU (Vulkan), or CPU |
 
-**Online mode (Google STT):**
-```sh
-cargo tauri build
-```
+The settings panel shows which one is active (the small badge next to the version number). You can change it anytime — no reinstall, no restart.
 
-**Offline mode (local Whisper):**
-```sh
-cargo tauri build --features whisper
-```
+## Get Spoke
 
-With GPU acceleration (pick one):
-```sh
-cargo tauri build --features whisper,cuda    # NVIDIA
-cargo tauri build --features whisper,vulkan  # AMD/Intel
-```
+Spoke is currently built from source. It takes one command per platform once the toolchain is installed — the full walkthrough for **macOS**, **Debian/Ubuntu**, **Arch Linux**, and **Windows** is in **[BUILD.md](BUILD.md)**.
 
-Build output: `src-tauri/target/release/bundle/`
+The build produces a normal installer for your system (`.dmg`/`.app` on macOS, `.deb`/`.rpm`/`.AppImage` on Linux, `.msi`/`.exe` on Windows). Everything else — the speech models — Spoke downloads itself when you ask it to.
 
-### 5. Install
+## First run
 
-```sh
-# Binary
-sudo install -Dm755 src-tauri/target/release/bundle/deb/Spoke_0.1.0_amd64/data/usr/bin/spoke \
-    /usr/local/bin/spoke
+- **macOS**: grant **Microphone** and **Accessibility** permissions when prompted (System Settings → Privacy & Security). Accessibility is what lets Spoke type for you. If you rebuild Spoke yourself, macOS treats each rebuild as a new app — re-grant both permissions after replacing the app.
+- **Linux on Wayland**: global hotkeys depend on your compositor. If the hotkey doesn't respond, launch with `GDK_BACKEND=x11 spoke`.
+- **Everywhere**: click the bubble to open settings, download a model, and you're set.
 
-# App launcher (.desktop)
-sudo install -Dm644 src-tauri/target/release/bundle/deb/Spoke_0.1.0_amd64/data/usr/share/applications/Spoke.desktop \
-    /usr/share/applications/Spoke.desktop
+If a permission is missing on macOS, the bubble shows an amber **!** — click it and use the **Fix** button in the warning banner to jump straight to the right System Settings pane.
 
-# Icons
-sudo install -Dm644 src-tauri/target/release/bundle/deb/Spoke_0.1.0_amd64/data/usr/share/icons/hicolor/256x256@2/apps/spoke.png \
-    /usr/share/icons/hicolor/256x256/apps/spoke.png
-sudo install -Dm644 src-tauri/target/release/bundle/deb/Spoke_0.1.0_amd64/data/usr/share/icons/hicolor/128x128/apps/spoke.png \
-    /usr/share/icons/hicolor/128x128/apps/spoke.png
-sudo install -Dm644 src-tauri/target/release/bundle/deb/Spoke_0.1.0_amd64/data/usr/share/icons/hicolor/32x32/apps/spoke.png \
-    /usr/share/icons/hicolor/32x32/apps/spoke.png
+## The bubble
 
-# Refresh icon cache
-sudo gtk-update-icon-cache -f /usr/share/icons/hicolor/
-```
+- **Dim** — idle, waiting.
+- **Warm glow, reacting to your voice** — recording.
+- **Teal shimmer** — transcribing.
 
-Spoke now appears in your application launcher and runs as `spoke` from the terminal.
+Drag it anywhere. Click it for settings: mode, hotkey, language, model, acceleration, microphone, transcript history, and optional recording-to-file.
 
-### Wayland note
+## Where things live
 
-Global hotkeys and text injection work best on X11. On Wayland (e.g. Hyprland, sway), hotkeys require a compositor that supports `zwp_virtual_keyboard_v1`. If the hotkey doesn't register, launch with:
+| What | Where |
+|---|---|
+| Settings (`spoke.toml`) | `~/Library/Application Support/spoke/` (macOS) · `~/.config/spoke/` (Linux) · `%APPDATA%\spoke\` (Windows) |
+| Downloaded models | `<config dir>/spoke/models/` |
+| Saved recordings (optional) | `~/Documents/Spoke` (configurable) |
 
-```sh
-GDK_BACKEND=x11 spoke
-```
+## More documentation
 
-### Offline model setup (Whisper builds only)
-
-Download a ggml model into `src-tauri/models/` before building, or place it at
-`~/.config/spoke/models/ggml-<name>.bin` at runtime. The model name must match
-the `model` field in `~/.config/spoke/spoke.toml`.
-
----
-
-## Prerequisites (other platforms)
-
-- Rust (stable) — https://rustup.rs
-- The Tauri CLI:
-  ```sh
-  cargo install tauri-cli --version "^2"
-  ```
-- Platform deps for Tauri v2 (WebKit/GTK on Linux, WebView2 on Windows, Xcode CLT on macOS).
-- For offline mode only: `cmake` + a C/C++ toolchain (whisper.cpp builds from source).
-
-## Run (dev)
-
-```sh
-cargo tauri dev
-```
-
-The UI is static, so there is no separate frontend dev server — Tauri serves
-`ui/` directly.
-
-## Build (release)
-
-```sh
-cargo tauri build
-```
-
-## Offline (Whisper) mode
-
-Offline transcription is feature-gated to keep the default build light:
-
-```sh
-cargo tauri build --features whisper
-```
-
-Download a ggml model into `src-tauri/models/` named `ggml-<model>.bin`
-(e.g. `ggml-large-v3-turbo.bin`) — matching the `model` value in the config.
-
-## Online (Google) mode
-
-Set `mode = "online"` and paste a Google Cloud API key (with the Speech-to-Text
-API enabled) into the settings panel. The key is stored in `spoke.toml` during
-development; production builds should move it to the system keychain.
-
-## Configuration
-
-`spoke.toml` lives in the OS config dir
-(`~/Library/Application Support/spoke/` on macOS, `~/.config/spoke/` on Linux,
-`%APPDATA%\spoke\` on Windows). It is created on first save; every field has a
-default. Schema is documented in [SPOKE.md](SPOKE.md#configuration).
-
-## Platform permissions
-
-- **macOS** — grant **Microphone** and **Accessibility** permissions (the
-  latter lets enigo synthesize keystrokes). System Settings → Privacy & Security.
-- **Linux (Wayland)** — global hotkeys and injection depend on the compositor's
-  support; X11 is the most reliable.
-
-## Tests
-
-```sh
-cd src-tauri && cargo test --lib
-```
-
-Unit tests cover config (de)serialization, audio mono/resample/PCM conversion,
-hotkey parsing, and Google response parsing — none require audio hardware or
-network.
-
-## Icons
-
-Regenerate the app icons (pure Python, no deps):
-
-```sh
-python3 src-tauri/scripts/gen_icons.py
-```
+- **[BUILD.md](BUILD.md)** — building and packaging for each platform
+- **[ARCHITECTURE.md](ARCHITECTURE.md)** — how Spoke works inside, globally and per platform
+- **[SPOKE.md](SPOKE.md)** — the original product specification

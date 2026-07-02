@@ -5,6 +5,8 @@ mod audio;
 mod config;
 mod hotkey;
 mod inject;
+mod permissions;
+mod platform;
 mod stt;
 
 use audio::AudioEngine;
@@ -27,7 +29,7 @@ struct EngineKey {
     mode: Mode,
     model: String,
     use_gpu: bool,
-    mac_accel: String,
+    accel: String,
     provider: String,
     api_key: String,
 }
@@ -38,7 +40,7 @@ impl EngineKey {
             mode: cfg.general.mode,
             model: cfg.offline.model.clone(),
             use_gpu: cfg.offline.use_gpu,
-            mac_accel: cfg.offline.mac_accel.clone(),
+            accel: cfg.offline.accel.clone(),
             provider: cfg.online.provider.clone(),
             api_key: cfg.online.api_key.clone(),
         }
@@ -117,46 +119,33 @@ fn list_audio_devices() -> Vec<String> {
 
 #[tauri::command]
 fn get_build_info() -> serde_json::Value {
-    // Highest-capability single label for the accel badge.
-    let acceleration = if cfg!(feature = "coreml") {
-        "CoreML"
-    } else if cfg!(feature = "metal") {
-        "Metal"
-    } else if cfg!(feature = "cuda") {
-        "CUDA"
-    } else if cfg!(feature = "vulkan") {
-        "Vulkan"
-    } else {
-        "CPU"
-    };
+    platform::build_info()
+}
 
-    serde_json::json!({
-        "acceleration": acceleration,
-        "whisper": cfg!(feature = "whisper"),
-        "is_macos": cfg!(target_os = "macos"),
-        "has_metal": cfg!(feature = "metal"),
-        "has_coreml": cfg!(feature = "coreml"),
-        "has_cuda": cfg!(feature = "cuda"),
-        "has_vulkan": cfg!(feature = "vulkan"),
-    })
+#[tauri::command]
+fn check_permissions() -> permissions::Permissions {
+    permissions::check()
+}
+
+#[tauri::command]
+fn open_permission_settings(which: String) {
+    permissions::open_settings(&which);
 }
 
 #[cfg(feature = "whisper")]
 #[tauri::command]
 fn check_model(model: String) -> Result<serde_json::Value, String> {
-    #[cfg(not(feature = "coreml"))]
-    return Ok(serde_json::json!({
+    let mut info = serde_json::json!({
         "exists": stt::whisper::model_exists(&model),
         "url": stt::whisper::model_download_url(&model),
         "coreml_exists": false,
-    }));
+    });
     #[cfg(feature = "coreml")]
-    Ok(serde_json::json!({
-        "exists": stt::whisper::model_exists(&model),
-        "url": stt::whisper::model_download_url(&model),
-        "coreml_exists": stt::whisper::coreml_bundle_exists(&model),
-        "coreml_url": stt::whisper::coreml_bundle_url(&model),
-    }))
+    {
+        info["coreml_exists"] = stt::whisper::coreml_bundle_exists(&model).into();
+        info["coreml_url"] = stt::whisper::coreml_bundle_url(&model).into();
+    }
+    Ok(info)
 }
 
 #[cfg(feature = "coreml")]
@@ -229,11 +218,11 @@ async fn download_coreml_bundle(app: AppHandle, model: String) -> Result<(), Str
 
         for i in 0..archive.len() {
             let mut entry = archive.by_index(i).map_err(|e| format!("zip entry: {e}"))?;
-            let out = dest_clone.join(entry.name());
-            // Prevent path traversal.
-            if !out.starts_with(&dest_clone) {
-                return Err(format!("unsafe zip path: {}", entry.name()));
-            }
+            // enclosed_name() rejects absolute paths and `..` traversal.
+            let rel = entry
+                .enclosed_name()
+                .ok_or_else(|| format!("unsafe zip path: {}", entry.name()))?;
+            let out = dest_clone.join(rel);
             if entry.is_dir() {
                 std::fs::create_dir_all(&out).map_err(|e| format!("mkdir: {e}"))?;
             } else {
@@ -274,6 +263,10 @@ async fn download_model(
         return Ok(());
     }
 
+    // Stream to a temp file and rename on success, so an interrupted download
+    // never leaves a truncated file that later passes the "model exists" check.
+    let tmp_path = dest_dir.join(format!("ggml-{model}.bin.tmp"));
+
     let client = reqwest::Client::builder()
         .user_agent("Spoke/0.1")
         .build()
@@ -286,7 +279,7 @@ async fn download_model(
 
     let total = response.content_length().unwrap_or(0);
     let mut downloaded: u64 = 0;
-    let mut file = tokio::fs::File::create(&dest_path).await.map_err(|e| e.to_string())?;
+    let mut file = tokio::fs::File::create(&tmp_path).await.map_err(|e| e.to_string())?;
     let mut stream = response.bytes_stream();
 
     while let Some(chunk) = stream.next().await {
@@ -305,6 +298,10 @@ async fn download_model(
     }
 
     file.flush().await.map_err(|e| e.to_string())?;
+    drop(file);
+    tokio::fs::rename(&tmp_path, &dest_path)
+        .await
+        .map_err(|e| format!("failed to finalize download: {e}"))?;
     let _ = app.emit("spoke:download-complete", serde_json::json!({ "model": model }));
     Ok(())
 }
@@ -544,6 +541,8 @@ pub fn run() {
             list_audio_devices,
             nudge_repaint,
             get_build_info,
+            check_permissions,
+            open_permission_settings,
             #[cfg(feature = "whisper")]
             check_model,
             #[cfg(feature = "whisper")]

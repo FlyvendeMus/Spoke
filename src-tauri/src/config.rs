@@ -66,9 +66,12 @@ pub struct Offline {
     /// "tiny" | "base" | "small" | "large-v3-turbo"
     pub model: String,
     pub use_gpu: bool,
-    /// macOS acceleration: "auto" | "metal" | "coreml" | "none".
-    /// Ignored on non-macOS (use_gpu governs instead).
-    pub mac_accel: String,
+    /// Acceleration backend: "auto" | "metal" | "coreml" | "cuda" | "vulkan" | "none".
+    /// Only backends compiled into this build take effect (see src/platform.rs);
+    /// "auto" picks the best one available. The `mac_accel` alias accepts
+    /// configs written before the field was generalised beyond macOS.
+    #[serde(alias = "mac_accel")]
+    pub accel: String,
 }
 
 impl Default for Offline {
@@ -76,7 +79,7 @@ impl Default for Offline {
         Self {
             model: "large-v3-turbo".into(),
             use_gpu: true,
-            mac_accel: "auto".into(),
+            accel: "auto".into(),
         }
     }
 }
@@ -250,6 +253,13 @@ mod tests {
         // Untouched fields keep their defaults.
         assert_eq!(c.general.hotkey, default_hotkey());
         assert_eq!(c.offline.model, "large-v3-turbo");
+    }
+
+    #[test]
+    fn legacy_mac_accel_field_still_parses() {
+        let toml = "[offline]\nmac_accel = \"metal\"\n";
+        let c: Config = toml::from_str(toml).unwrap();
+        assert_eq!(c.offline.accel, "metal");
     }
 
     #[test]

@@ -1,92 +1,99 @@
 # Building Spoke
 
+Spoke is built per platform: you pick one **platform preset** flag, and the
+resulting binary contains exactly the acceleration backends that platform
+supports — nothing else. Impossible combinations (e.g. Metal on Linux) are
+rejected at compile time, so a build can never carry another platform's code.
+
+The output is a normal installer/bundle for the target OS. Speech models are
+**not** bundled — the app downloads them on demand (see
+[ARCHITECTURE.md](ARCHITECTURE.md#model-management)), which keeps installers
+small while staying fully self-contained after the first model download.
+
+---
+
+## Platform presets
+
+Release builds should use one of these single flags:
+
+| Preset | OS | Backends compiled in |
+|---|---|---|
+| `platform-macos` | macOS (Apple Silicon) | CoreML + Metal + CPU |
+| `platform-linux-cuda` | Linux | CUDA + CPU |
+| `platform-linux-vulkan` | Linux | Vulkan + CPU |
+| `platform-linux-cpu` | Linux | CPU |
+| `platform-windows-cuda` | Windows | CUDA + CPU |
+| `platform-windows-vulkan` | Windows | Vulkan + CPU |
+| `platform-windows-cpu` | Windows | CPU |
+
+```sh
+cargo tauri build --features platform-macos
+```
+
+The user picks the active backend at runtime in the settings panel
+(**Accel** row); *Auto* selects the best one compiled in.
+
+### Individual capability flags
+
+Presets are just bundles of these, for finer control:
+
+| Flag | Description | Platform |
+|---|---|---|
+| `whisper` | Offline transcription via whisper.cpp | All |
+| `metal` | Apple GPU acceleration (implies `whisper`) | macOS only |
+| `coreml` | Apple Neural Engine acceleration (implies `whisper`) | macOS only |
+| `cuda` | NVIDIA GPU acceleration (implies `whisper`) | Linux/Windows |
+| `vulkan` | AMD/Intel/NVIDIA GPU via Vulkan (implies `whisper`) | Linux/Windows |
+
+No flags at all = online-only build (Google STT, no local models).
+
+---
+
 ## Prerequisites (all platforms)
 
 - Rust 1.77+ (`rustup update`)
-- Node.js 18+ (for Tauri CLI)
-- CMake 3.20+ (required by whisper.cpp)
-- C/C++ toolchain (gcc/clang)
-
-Install Tauri CLI:
-```sh
-cargo install tauri-cli
-```
+- Tauri CLI: `cargo install tauri-cli --version "^2"`
+- For any `whisper` build: CMake 3.20+ and a C/C++ toolchain
+  (whisper.cpp is compiled from source during the build)
 
 ---
 
-## Feature flags
+## macOS (Apple Silicon)
 
-| Flag      | Description                                     | Platform        |
-|-----------|-------------------------------------------------|-----------------|
-| `whisper` | Enable offline transcription via whisper.cpp    | All             |
-| `metal`   | GPU acceleration via Apple Metal                | macOS (M1/M2+)  |
-| `coreml`  | Neural Engine acceleration via CoreML           | macOS (M1/M2+)  |
-| `cuda`    | GPU acceleration via NVIDIA CUDA                | Linux / Windows |
-| `vulkan`  | GPU acceleration via Vulkan (AMD/Intel/NVIDIA)  | Linux / Windows |
-
-Flags are additive. Always pair a GPU flag with `whisper`:
-```sh
---features whisper,metal
-```
-
----
-
-## macOS (Apple Silicon — M1/M2/M3)
-
-### Option A: Metal (recommended, easiest)
-
-Metal uses the Apple GPU directly. Zero extra setup — Xcode tools are sufficient.
-
-**Prerequisites:**
-```sh
-xcode-select --install
-```
-
-**Dev build:**
-```sh
-cargo tauri dev --features whisper,metal
-```
-
-**Release build:**
-```sh
-cargo tauri build --features whisper,metal
-```
-
-The settings panel will show `Metal` under **Accel** when running.
-
----
-
-### Option B: CoreML (fastest — uses Apple Neural Engine)
-
-CoreML offloads the Whisper encoder to the Apple Neural Engine. Faster than
-Metal for audio >3 s. The encoder bundle is downloaded automatically from
-Hugging Face at runtime — no manual model conversion needed.
-
-**Build with CoreML:**
+**Prerequisites:** Xcode command-line tools — `xcode-select --install`
 
 ```sh
-cargo tauri build --features coreml
+cargo tauri build --features platform-macos
 ```
 
-(`coreml` implies `whisper` — no need to specify both.)
+This compiles in both CoreML (Apple Neural Engine — fastest for clips >3 s)
+and Metal (GPU). The settings panel offers *Auto*, *CoreML*, *Metal*, and
+*CPU only*; the CoreML encoder bundle is downloaded in-app on first use
+(settings → **ANE bundle → Get**).
 
-**At runtime:**
+**Output:** `src-tauri/target/release/bundle/` — `Spoke.app` and a `.dmg`.
 
-1. Open the Spoke settings panel (click the bubble).
-2. The **CoreML** row shows `—` and a **Download** button.
-3. Click **Download** — Spoke fetches and extracts the encoder bundle
-   (~100–800 MB depending on model) into
-   `~/Library/Application Support/spoke/models/`.
-4. Once complete the row shows `✓`. Subsequent launches use the cached bundle.
+### macOS permissions (release bundles)
 
-> **Note:** CoreML and Metal are mutually exclusive. CoreML takes priority
-> in the feature detection order — if both are enabled, CoreML is reported.
+The bundle build merges `src-tauri/Info.plist` (microphone usage description)
+into the app and signs with `src-tauri/entitlements.plist` (audio-input).
+Without the usage description macOS silently denies microphone access to a
+bundled app — dev builds don't hit this because the terminal's own mic
+permission covers `cargo tauri dev`. Don't remove these files.
 
----
+On first launch, grant when prompted (System Settings → Privacy & Security):
 
-## macOS (Intel)
+- **Microphone** — recording
+- **Accessibility** — lets Spoke type the transcript into other apps
 
-Intel Macs have no Metal compute support for whisper.cpp. CPU only:
+> **Rebuild gotcha:** local builds are ad-hoc signed, and every rebuild gets a
+> new signature — macOS then treats it as a new app and silently drops the old
+> Microphone/Accessibility grants. If a rebuilt Spoke.app stops hearing you or
+> stops typing, remove and re-add it in both permission lists.
+
+### macOS (Intel)
+
+whisper.cpp's Metal/CoreML paths target Apple Silicon; build CPU-only:
 
 ```sh
 cargo tauri build --features whisper
@@ -94,248 +101,195 @@ cargo tauri build --features whisper
 
 ---
 
-## Linux (NVIDIA GPU — CUDA)
+## Linux
 
-**Prerequisites:**
-- CUDA Toolkit 11.8+ (`nvcc` on PATH)
-- `libcuda.so` present
+### System dependencies
 
+**Debian / Ubuntu:**
 ```sh
-cargo tauri build --features whisper,cuda
+sudo apt install build-essential curl wget git cmake pkg-config \
+    libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+    librsvg2-dev libssl-dev libasound2-dev
 ```
 
-Verify CUDA is found during build — if `nvcc` is missing, the build falls
-back to CPU silently. Check build output for `GGML_CUDA=1`.
+**Arch:**
+```sh
+sudo pacman -S --needed base-devel curl wget git cmake \
+    webkit2gtk-4.1 gtk3 libappindicator-gtk3 librsvg \
+    openssl pkgconf alsa-lib pipewire-alsa
+```
+
+### Build
+
+**NVIDIA GPU (CUDA)** — needs CUDA Toolkit 11.8+ (`nvcc` on PATH):
+```sh
+cargo tauri build --features platform-linux-cuda
+```
+If `nvcc` is missing the whisper.cpp build fails; install the toolkit
+(`sudo pacman -S cuda` / NVIDIA's apt repo) or use Vulkan instead.
+
+**Any GPU (Vulkan)** — needs Vulkan headers
+(`sudo apt install libvulkan-dev` / `sudo pacman -S vulkan-devel`):
+```sh
+cargo tauri build --features platform-linux-vulkan
+```
+
+**CPU only:**
+```sh
+cargo tauri build --features platform-linux-cpu
+```
+
+**Output:** `src-tauri/target/release/bundle/` — `.deb`, `.rpm`, and
+`.AppImage`. The AppImage is the single-file option: one executable that runs
+on any distro, no install step.
+
+### Installing
+
+- **Debian/Ubuntu:** `sudo apt install ./src-tauri/target/release/bundle/deb/Spoke_0.1.0_amd64.deb`
+- **Fedora/openSUSE:** `sudo rpm -i src-tauri/target/release/bundle/rpm/Spoke-0.1.0-1.x86_64.rpm`
+- **Any distro:** `chmod +x Spoke_0.1.0_amd64.AppImage && ./Spoke_0.1.0_amd64.AppImage`
+- **Arch:** no native pacman target; use the AppImage, or install the deb's
+  contents manually:
+  ```sh
+  B=src-tauri/target/release/bundle/deb/Spoke_0.1.0_amd64/data
+  sudo install -Dm755 $B/usr/bin/spoke /usr/local/bin/spoke
+  sudo install -Dm644 $B/usr/share/applications/Spoke.desktop /usr/share/applications/Spoke.desktop
+  for s in 32x32 128x128; do
+    sudo install -Dm644 $B/usr/share/icons/hicolor/$s/apps/spoke.png /usr/share/icons/hicolor/$s/apps/spoke.png
+  done
+  sudo gtk-update-icon-cache -f /usr/share/icons/hicolor/
+  ```
+
+### Wayland note
+
+Global hotkeys and text injection are most reliable on X11. On Wayland the
+compositor must support `zwp_virtual_keyboard_v1`. If the hotkey doesn't
+register: `GDK_BACKEND=x11 spoke`.
 
 ---
 
-## Linux (AMD/Intel GPU — Vulkan)
+## Windows — step-by-step setup
 
-**Prerequisites:**
-```sh
-# Debian/Ubuntu
-sudo apt install libvulkan-dev vulkan-tools
-
-# Arch
-sudo pacman -S vulkan-devel
-```
-
-```sh
-cargo tauri build --features whisper,vulkan
-```
-
----
-
-## Linux (CPU only)
-
-```sh
-cargo tauri build --features whisper
-```
-
----
-
-## Windows — Step-by-step setup
-
-Building on Windows requires several tools. Run each verification command to confirm the tool is on your `PATH` before proceeding.
+Run each verification command before proceeding.
 
 ### 1. Visual Studio 2022 Build Tools (MSVC)
 
-Required for Rust's MSVC target and the C/C++ compiler that whisper.cpp needs.
+Rust's MSVC target and whisper.cpp's C/C++ compiler.
 
-1. Download from https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2022
-2. In the installer, select **Desktop development with C++**
-3. Under **Individual components**, ensure **Windows 10/11 SDK** is included
-4. Install and restart
+1. Download: https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2022
+2. Select **Desktop development with C++**
+3. Under **Individual components**, ensure a **Windows 10/11 SDK** is included
 
-**Verify:**
-```powershell
-cl.exe
-```
-Should print the MSVC compiler version.
-
----
+**Verify:** `cl.exe` prints the compiler version.
 
 ### 2. CMake
 
-Required by whisper.cpp to generate build files.
-
-1. Download from https://cmake.org/download/ (Windows x64 Installer)
+1. Download the Windows x64 installer: https://cmake.org/download/
 2. During install, **check "Add CMake to the system PATH"**
-3. Install and restart your terminal
 
-**Verify:**
-```powershell
-cmake --version
-```
+**Verify:** `cmake --version`
 
-If you missed the PATH option during install, you can add it manually:
-- Add `C:\Program Files\CMake\bin` to your system or user `Path` environment variable, or
-- Run this before building (session-only):
-  ```powershell
-  $env:Path += ";C:\Program Files\CMake\bin"
-  ```
-
----
+Missed the PATH option? Add `C:\Program Files\CMake\bin` to `Path`, or
+session-only: `$env:Path += ";C:\Program Files\CMake\bin"`
 
 ### 3. LLVM / Clang (libclang)
 
-Required by Rust's `bindgen` crate to parse C headers. Without it the build fails with:
+Rust's `bindgen` needs libclang to parse whisper.cpp's headers. Without it:
 ```
 Unable to find libclang: "couldn't find any valid shared libraries matching: ['clang.dll', 'libclang.dll']"
 ```
 
-1. Download the latest LLVM release from https://github.com/llvm/llvm-project/releases (grab `LLVM-<version>-win64.exe`)
-2. Run the installer — **check "Add LLVM to the system PATH"**
-3. Install and restart your terminal
+1. Download `LLVM-<version>-win64.exe`: https://github.com/llvm/llvm-project/releases
+2. **Check "Add LLVM to the system PATH"** during install
 
-**Verify:**
-```powershell
-clang --version
-```
+**Verify:** `clang --version`
 
-Then set the environment variable that bindgen reads:
-
+Then set (permanently, via a user environment variable, or per session):
 ```powershell
 $env:LIBCLANG_PATH = "C:\Program Files\LLVM\bin"
 ```
 
-To make this permanent, add a system/user environment variable named `LIBCLANG_PATH` with value `C:\Program Files\LLVM\bin`.
-
----
-
-### 4. Rust (with rustfmt)
+### 4. Rust + Tauri CLI
 
 ```powershell
 rustup update
 rustup component add rustfmt
-```
-
-**Verify:**
-```powershell
-rustc --version
-rustfmt --version
-```
-
----
-
-### 5. Tauri CLI
-
-```powershell
 cargo install tauri-cli
 ```
 
----
+### 5a. CUDA Toolkit (NVIDIA GPU builds)
 
-### 6. Node.js
+1. Download CUDA Toolkit 11.8+: https://developer.nvidia.com/cuda-downloads
+2. Install — it adds itself to `PATH`
 
-Required by Tauri for webview bundling. Download from https://nodejs.org/ (18+).
+**Verify:** `nvcc --version`
 
-**Verify:**
-```powershell
-node --version
-```
+> End users don't need any of this — a CUDA build only requires the normal
+> NVIDIA driver on the user's machine.
 
----
+### 5b. Vulkan SDK (alternative to CUDA)
 
-### 7a. CUDA Toolkit (for NVIDIA GPU acceleration)
-
-1. Download CUDA Toolkit 11.8+ from https://developer.nvidia.com/cuda-downloads
-2. Run the installer
-3. The installer adds CUDA to your `PATH` automatically
-
-**Verify:**
-```powershell
-nvcc --version
-```
-
-> **Note:** End users do **not** need any of these build tools — they only need the NVIDIA GPU driver for CUDA-accelerated builds.
-
----
-
-### 7b. Vulkan SDK (alternative to CUDA)
-
-If you prefer not to install CUDA, or have a non-NVIDIA GPU, use Vulkan instead:
-
-1. Download the Vulkan SDK from https://vulkan.lunang.com
-2. Install and restart
-
-```powershell
-cargo tauri build --features whisper,vulkan
-```
-
----
+For non-NVIDIA GPUs, or to avoid the CUDA toolkit:
+download and install the Vulkan SDK from https://vulkan.lunarg.com
 
 ### Build
 
-**CUDA (NVIDIA GPU):**
 ```powershell
-cargo tauri build --features whisper,cuda
+cargo tauri build --features platform-windows-cuda    # NVIDIA GPU
+cargo tauri build --features platform-windows-vulkan  # any GPU
+cargo tauri build --features platform-windows-cpu     # CPU only
 ```
 
-**Vulkan (any GPU):**
-```powershell
-cargo tauri build --features whisper,vulkan
-```
+Dev build with live reload: `cargo tauri dev --features platform-windows-cuda`
 
-**CPU only:**
-```powershell
-cargo tauri build --features whisper
-```
-
-**Dev build** (same flags, live-reload):
-```powershell
-cargo tauri dev --features whisper,cuda
-```
+**Output:** `src-tauri\target\release\bundle\` — `.msi` (Windows Installer)
+and `.exe` (NSIS setup). Both are self-contained: the MSVC C runtime is
+statically linked (see `src-tauri/.cargo/config.toml`), so end users don't
+need the Visual C++ Redistributable, and the installer fetches WebView2 if
+it's somehow missing (it ships with Windows 10/11).
 
 ### Troubleshooting
 
-| Error | Likely fix |
-|-------|------------|
-| `is cmake not installed?` | Install CMake and add to PATH |
+| Error | Fix |
+|---|---|
+| `is cmake not installed?` | Install CMake, add to PATH |
 | `Unable to find libclang` | Install LLVM, set `LIBCLANG_PATH` |
-| `called Result::unwrap() on an Err value: NotPresent` (CUDA libs) | Install CUDA Toolkit or switch to `vulkan` |
-| `rustfmt.exe is not installed` | Run `rustup component add rustfmt` |
+| CUDA libs `NotPresent` | Install CUDA Toolkit or switch to `platform-windows-vulkan` |
+| `rustfmt.exe is not installed` | `rustup component add rustfmt` |
 
 ---
 
-## Arch Linux full setup
+## Development builds
 
-See the detailed guide in README.md §"Arch Linux build & install".
+`cargo tauri dev` accepts the same flags:
 
----
-
-## Checking acceleration at runtime
-
-Open the Spoke settings panel (click the bubble). The **Accel** row shows
-which backend was compiled in:
-
-| Value            | Meaning                                          |
-|------------------|--------------------------------------------------|
-| `Metal`          | Apple GPU via Metal                              |
-| `CoreML`         | Apple Neural Engine via CoreML                   |
-| `CUDA`           | NVIDIA GPU via CUDA                              |
-| `Vulkan`         | GPU via Vulkan (AMD/Intel/NVIDIA)                |
-| `CPU`            | Whisper built without GPU support                |
-| `CPU (no whisper)` | Whisper feature not compiled in (online only)  |
-
----
-
-## CoreML implementation notes
-
-CoreML encoder bundles are pre-converted and hosted on HuggingFace by the
-whisper.cpp project. Spoke downloads and extracts the `.mlmodelc.zip` at
-runtime via the **CoreML → Download** button in the settings panel.
-
-The bundle is extracted to:
-```
-~/Library/Application Support/spoke/models/ggml-<model>-encoder.mlmodelc/
+```sh
+cargo tauri dev --features platform-macos
+cargo tauri dev                              # online-only, fastest compile
 ```
 
-whisper.cpp discovers it automatically by convention (strips `.bin`, appends
-`-encoder.mlmodelc`), so no path config is required.
+Unit tests (no audio hardware or network needed):
 
-Remaining tasks:
-- [ ] Validate `.mlmodelc` existence at startup when built with `--features coreml`
-      and emit a clear error to the UI if missing (rather than a cryptic crash)
-- [ ] Support bundling a pre-downloaded `.mlmodelc` in `tauri.conf.json` resources
-      for fully offline distribution
+```sh
+cd src-tauri && cargo test --lib
+```
+
+---
+
+## Checking the result at runtime
+
+Open the settings panel (click the bubble). The badge next to the version
+shows the **active** backend; the **Accel** dropdown lists everything the
+build compiled in:
+
+| Badge | Meaning |
+|---|---|
+| `CoreML` | Apple Neural Engine |
+| `Metal` | Apple GPU |
+| `CUDA` | NVIDIA GPU |
+| `Vulkan` | GPU via Vulkan |
+| `CPU` | Whisper on CPU |
+| `CPU (no whisper)` | Built without `whisper` — online mode only |
+
+How this detection works, and how to add a new backend, is documented in
+[ARCHITECTURE.md](ARCHITECTURE.md#the-platform-system).

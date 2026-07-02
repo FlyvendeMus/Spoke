@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Merged into the generated Spoke.app Info.plist by Tauri at bundle time.
+
+  NSMicrophoneUsageDescription is mandatory: a bundled macOS app that touches
+  the microphone without this key is denied by TCC (no prompt, capture just
+  fails), which silently breaks transcription in release builds even though
+  `cargo tauri dev` works under the terminal's mic permission.
+-->
+<plist version="1.0">
+<dict>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Spoke records your voice while the hotkey is held so it can transcribe what you say.</string>
+</dict>
+</plist>

@@ -18,6 +18,9 @@
           <button id="closePanel" type="button" class="mini-btn" style="margin-left:auto">&times;</button>
         </header>
 
+        <!-- Permission warnings — filled by JS when the OS reports missing access -->
+        <div id="permWarning" class="perm-warning hide"></div>
+
         <div class="panel-row">
           <label for="mode">Mode</label>
           <select id="mode">
@@ -69,10 +72,11 @@
           </div>
         </div>
 
-        <!-- GPU backend selector — shown by JS when GPU features compiled in -->
+        <!-- Acceleration backend selector — populated by JS from the build's
+             compiled backend list; hidden when only CPU is available -->
         <div id="gpuRow" class="panel-row offline-only hide">
-          <label for="macAccel">Accel</label>
-          <select id="macAccel"></select>
+          <label for="accel">Accel</label>
+          <select id="accel"></select>
         </div>
 
         <!-- CoreML bundle row — shown when CoreML selected -->
@@ -128,6 +132,10 @@
 
         <p id="status" class="muted status"></p>
       </section>
+
+      <!-- Warning dot pinned to the bubble's top-right corner (outside the
+           bubble button so the circle's overflow clipping can't cut it off) -->
+      <span id="permBadge" class="perm-badge hide" title="Missing permissions — click bubble for details">!</span>
 
       <!-- The bubble -->
       <button id="bubble" class="idle" aria-label="Spoke">

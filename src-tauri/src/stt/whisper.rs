@@ -29,7 +29,7 @@ impl WhisperStt {
             let mut disabled = bundle.as_os_str().to_os_string();
             disabled.push(".disabled");
             let disabled = PathBuf::from(disabled);
-            let use_coreml = cfg.offline.mac_accel == "coreml" || cfg.offline.mac_accel == "auto";
+            let use_coreml = cfg.offline.accel == "coreml" || cfg.offline.accel == "auto";
 
             if use_coreml && disabled.exists() {
                 std::fs::rename(&disabled, &bundle)
@@ -93,10 +93,10 @@ impl WhisperStt {
 }
 
 /// Resolve whether GPU should be enabled given the current config and build.
-/// "none" always disables GPU. On macOS `mac_accel` selects the backend; on Linux
-/// it selects CUDA/Vulkan if compiled in, or falls back to the default GPU backend.
+/// `accel = "none"` always disables GPU; otherwise whisper.cpp uses whichever
+/// GPU backend was compiled in (Metal/CUDA/Vulkan — see src/platform.rs).
 fn wants_gpu(cfg: &crate::config::Config) -> bool {
-    cfg.offline.mac_accel != "none" && cfg.offline.use_gpu
+    cfg.offline.accel != "none" && cfg.offline.use_gpu
 }
 
 /// Hugging Face URL for a whisper.cpp ggml model.

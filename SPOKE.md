@@ -181,13 +181,16 @@ All settings are stored in a single `spoke.toml` file in the OS config directory
 ```toml
 [general]
 mode = "offline"          # "offline" | "online"
-hotkey = "ctrl+alt+space"
+hotkey = "ctrl+alt+space" # default is "cmd+shift+s" on macOS
 trigger = "push_to_talk"  # "push_to_talk" | "toggle"
 language = "auto"         # "auto" | "da" | "en" | ...
+copy_to_clipboard = false # true: copy transcript instead of typing it
 
 [offline]
 model = "large-v3-turbo"
 use_gpu = true
+accel = "auto"            # "auto" | "metal" | "coreml" | "cuda" | "vulkan" | "none"
+                          # only backends compiled into the build take effect
 
 [online]
 provider = "google"       # "google" | "openai"
@@ -197,6 +200,8 @@ api_key = ""              # stored in system keychain in production
 save_audio = false
 save_path = "~/Documents/Spoke"
 format = "wav"            # "wav" | "flac"
+save_processed = false    # true: save the mono 16 kHz silence-stripped audio
+input_device = ""         # microphone name; empty = system default
 
 [ui]
 bubble_position = "bottom-right"

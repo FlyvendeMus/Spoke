@@ -1,0 +1,5 @@
+# Statically link the MSVC C runtime on Windows so the shipped .exe/.msi runs
+# without the Visual C++ Redistributable installed. The cmake crate propagates
+# this to the whisper.cpp build (/MT) as well.
+[target.'cfg(all(windows, target_env = "msvc"))']
+rustflags = ["-C", "target-feature=+crt-static"]

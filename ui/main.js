@@ -19,7 +19,7 @@ const fields = {
   trigger: $("trigger"),
   language: $("language"),
   model: $("model"),
-  macAccel: $("macAccel"),
+  accel: $("accel"),
   apikey: $("apikey"),
   saveAudio: $("saveAudio"),
   savePath: $("savePath"),
@@ -38,6 +38,69 @@ let buildInfo = null;
 let history = [];
 const MAX_HISTORY = 50;
 let historyVisible = false;
+
+// ---- Permission warnings --------------------------------------------------
+
+const permWarning = $("permWarning");
+const permBadge = $("permBadge");
+let permissions = null;
+let lastPermSig = null;
+
+const PERM_INFO = {
+  microphone: { label: "Microphone access denied", hint: "Spoke can't hear you" },
+  accessibility: { label: "Accessibility not granted", hint: "Spoke can't type for you" },
+};
+
+function missingPermissions() {
+  if (!permissions) return [];
+  const missing = [];
+  if (permissions.microphone === "denied") missing.push("microphone");
+  // Accessibility only matters for keystroke injection; clipboard mode doesn't
+  // use it, so don't nag about it there.
+  const injecting = !(config && config.general && config.general.copy_to_clipboard);
+  if (injecting && permissions.accessibility === "denied") missing.push("accessibility");
+  return missing;
+}
+
+function renderPermissionWarnings() {
+  const missing = missingPermissions();
+  const sig = missing.join(",");
+  if (sig === lastPermSig) return;
+  lastPermSig = sig;
+
+  permBadge.classList.toggle("hide", missing.length === 0);
+  permWarning.classList.toggle("hide", missing.length === 0);
+  permWarning.innerHTML = "";
+  for (const key of missing) {
+    const row = document.createElement("div");
+    row.className = "perm-row";
+    const text = document.createElement("span");
+    text.textContent = `⚠ ${PERM_INFO[key].label} — ${PERM_INFO[key].hint}`;
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "mini-btn";
+    btn.textContent = "Fix";
+    btn.title = "Open the system settings pane for this permission";
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      invoke("open_permission_settings", { which: key });
+    });
+    row.appendChild(text);
+    row.appendChild(btn);
+    permWarning.appendChild(row);
+  }
+  // Visibility changed — force a frame on Wayland (see nudge_repaint).
+  invoke("nudge_repaint");
+}
+
+async function checkPermissions() {
+  try {
+    permissions = await invoke("check_permissions");
+  } catch (_) {
+    permissions = null;
+  }
+  renderPermissionWarnings();
+}
 
 // ── Mosaic canvas setup ───────────────────────────────────────────────────
 const S   = 48;
@@ -116,6 +179,8 @@ function openPanel() {
   panel.classList.remove("hidden");
   resizeAndReposition(PANEL_W, PANEL_H);
   invoke("nudge_repaint");
+  // Re-check on open so the banner reflects grants made since the last poll.
+  checkPermissions();
 }
 
 // Use pointerdown (fires before click) for reliability on Linux/GTK.
@@ -146,7 +211,9 @@ function formFromConfig(c) {
   fields.trigger.value = c.general.trigger;
   fields.language.value = c.general.language;
   fields.model.value = c.offline.model;
-  if (c.offline.mac_accel) fields.macAccel.value = c.offline.mac_accel;
+  // The accel select is populated later by loadBuildInfo(), which re-applies
+  // the saved value once the options exist.
+  if (c.offline.accel) fields.accel.value = c.offline.accel;
   fields.apikey.value = c.online.api_key;
   fields.saveAudio.checked = c.recording.save_audio;
   fields.savePath.value = c.recording.save_path;
@@ -165,7 +232,9 @@ function configFromForm() {
   c.general.trigger = fields.trigger.value;
   c.general.language = fields.language.value;
   c.offline.model = fields.model.value;
-  c.offline.mac_accel = fields.macAccel.value;
+  // Empty when the selector was never populated (CPU-only build) — keep the
+  // stored value rather than clobbering it.
+  if (fields.accel.value) c.offline.accel = fields.accel.value;
   c.online.api_key = fields.apikey.value;
   c.recording.save_audio = fields.saveAudio.checked;
   c.recording.save_path = fields.savePath.value.trim();
@@ -195,6 +264,8 @@ async function pushConfig() {
   } catch (e) {
     flash(String(e));
   }
+  // Clipboard mode toggles whether the Accessibility warning is relevant.
+  renderPermissionWarnings();
 }
 
 let flashTimer = null;
@@ -536,7 +607,7 @@ window.addEventListener("pointercancel", () => {
 // ---- Form wiring + boot -------------------------------------------------
 
 for (const el of Object.values(fields)) {
-  if (el.id !== "model" && el.id !== "macAccel") {
+  if (el.id !== "model" && el.id !== "accel") {
     el.addEventListener("change", pushConfig);
   }
 }
@@ -546,27 +617,30 @@ fields.model.addEventListener("change", async () => {
   if (!modelDownloading) checkCurrentModel();
 });
 
-fields.macAccel.addEventListener("change", async () => {
+fields.accel.addEventListener("change", async () => {
   applyCoremlRowVisibility();
   updateAccelBadge();
   await pushConfig();
   if (!modelDownloading) checkCurrentModel();
 });
 
-function getEffectiveAccel(macAccel, buildInfo) {
-  if (!buildInfo) return "—";
-  if (macAccel === "none") return "CPU";
-  if (macAccel === "metal" && buildInfo.has_metal) return "Metal";
-  if (macAccel === "coreml" && buildInfo.has_coreml) return "CoreML";
-  if (macAccel === "cuda" && buildInfo.has_cuda) return "CUDA";
-  if (macAccel === "vulkan" && buildInfo.has_vulkan) return "Vulkan";
-  if (macAccel === "auto" || !macAccel) return buildInfo.acceleration || "CPU";
-  return "CPU";
+// True when the given backend id was compiled into this build.
+function hasBackend(id) {
+  return !!(buildInfo && buildInfo.backends && buildInfo.backends.some((b) => b.id === id));
+}
+
+// Badge label for the currently selected accel value. "auto" resolves to the
+// build's best backend; unknown/stale ids fall back to CPU.
+function getEffectiveAccel(accel, info) {
+  if (!info) return "—";
+  if (!info.whisper) return "CPU";
+  if (accel === "auto" || !accel) return info.acceleration || "CPU";
+  const backend = (info.backends || []).find((b) => b.id === accel);
+  return backend ? backend.badge : "CPU";
 }
 
 function updateAccelBadge() {
-  const macAccel = fields.macAccel.value;
-  const label = getEffectiveAccel(macAccel, buildInfo);
+  const label = getEffectiveAccel(fields.accel.value, buildInfo);
   accelBadge.textContent = label;
   accelBadge.dataset.accel = label;
 }
@@ -577,33 +651,28 @@ async function loadBuildInfo() {
     if (!buildInfo.whisper) {
       accelBadge.textContent = "CPU (no whisper)";
       accelBadge.dataset.accel = "CPU";
+      return;
     }
 
-    // Build the list of GPU backends available on this platform.
-    const opts = [];
-    if (buildInfo.is_macos) {
-      if (buildInfo.has_metal) opts.push(["metal", "Metal (GPU)"]);
-      if (buildInfo.has_coreml) opts.push(["coreml", "CoreML (ANE)"]);
-    } else {
-      if (buildInfo.has_cuda) opts.push(["cuda", "CUDA (GPU)"]);
-      if (buildInfo.has_vulkan) opts.push(["vulkan", "Vulkan (GPU)"]);
-    }
-    opts.push(["none", "CPU only"]);
-
-    // Show GPU selector when there is more than just "none".
-    if (opts.length > 1) {
-      const sel = fields.macAccel;
+    // Backends come from the build (best first, CPU always last). Show the
+    // selector only when there is an actual choice beyond CPU.
+    const backends = buildInfo.backends || [];
+    if (backends.length > 1) {
+      const sel = fields.accel;
       sel.innerHTML = "";
-      for (const [val, label] of opts) {
+      const auto = document.createElement("option");
+      auto.value = "auto";
+      auto.textContent = `Auto (${buildInfo.acceleration})`;
+      sel.appendChild(auto);
+      for (const b of backends) {
         const opt = document.createElement("option");
-        opt.value = val;
-        opt.textContent = label;
+        opt.value = b.id;
+        opt.textContent = b.label;
         sel.appendChild(opt);
       }
-      // Default selection: prefer first non-"none" option, else "none".
-      if (!sel.value || !opts.some(([v]) => v === sel.value)) {
-        sel.value = opts.length > 1 ? opts[0][0] : "none";
-      }
+      // Restore the saved choice; values from another build fall back to auto.
+      const saved = config && config.offline ? config.offline.accel : "";
+      sel.value = saved === "auto" || backends.some((b) => b.id === saved) ? saved : "auto";
       $("gpuRow").classList.remove("hide");
     }
 
@@ -615,8 +684,8 @@ async function loadBuildInfo() {
 }
 
 function applyCoremlRowVisibility() {
-  const show = buildInfo && buildInfo.is_macos && buildInfo.has_coreml &&
-    (fields.macAccel.value === "coreml" || fields.macAccel.value === "auto");
+  const show = hasBackend("coreml") &&
+    (fields.accel.value === "coreml" || fields.accel.value === "auto");
   $("coremlRow").classList.toggle("hide", !show);
 }
 
@@ -641,7 +710,7 @@ async function checkCurrentModel() {
       dlBtn.classList.remove("hide");
     }
     // Update CoreML bundle status if that row is visible.
-    if (buildInfo && buildInfo.has_coreml && !$("coremlRow").classList.contains("hide")) {
+    if (hasBackend("coreml") && !$("coremlRow").classList.contains("hide")) {
       updateCoremlStatus(info.coreml_exists);
     }
   } catch (_) {
@@ -768,6 +837,10 @@ async function init() {
   }
   loadBuildInfo();
   checkCurrentModel();
+  checkPermissions();
+  // Permissions can change behind our back (System Settings, TCC resets on
+  // rebuild); poll cheaply so warnings appear and clear without a restart.
+  setInterval(checkPermissions, 15000);
   requestAnimationFrame(tick);
   // Window starts at 320×320; shrink to bubble-only size immediately.
   resizeAndReposition(BUBBLE_W, BUBBLE_H);

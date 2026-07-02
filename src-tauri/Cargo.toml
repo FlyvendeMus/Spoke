@@ -39,11 +39,11 @@ base64 = "0.22"
 # Async runtime
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
 
-# Async stream processing (model download)
-futures-util = { version = "0.3", default-features = false, features = ["std"] }
+# Async stream processing (model download) — only needed by whisper builds
+futures-util = { version = "0.3", default-features = false, features = ["std"], optional = true }
 
-# Zip extraction (CoreML bundle download)
-zip = { version = "2", default-features = false, features = ["deflate"] }
+# Zip extraction (CoreML bundle download) — only needed by coreml builds
+zip = { version = "2", default-features = false, features = ["deflate"], optional = true }
 
 # Misc
 anyhow = "1"
@@ -53,22 +53,43 @@ dirs = "5"
 # Offline STT — heavy native build (whisper.cpp + cmake). Opt in with `--features whisper`.
 whisper-rs = { version = "0.16", optional = true }
 
+# macOS permission queries (mic TCC status, Accessibility trust) — already in
+# the tree transitively via tauri, so this adds no new builds.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSString"] }
+
 [features]
 default = []
+
+# ---- Capability flags -------------------------------------------------------
 # Enable local Whisper transcription. Requires cmake + a C/C++ toolchain.
-whisper = ["dep:whisper-rs"]
-# Apple Silicon GPU acceleration via Metal. Enable alongside `whisper`, e.g.
-# `--features whisper,metal`. Requires macOS 10.13+ and Xcode command-line tools.
+whisper = ["dep:whisper-rs", "dep:futures-util"]
+# Apple GPU acceleration via Metal. Implies `whisper`. macOS only —
+# non-macOS builds fail with a compile error (see src/platform.rs).
 metal = ["whisper", "whisper-rs/metal"]
-# Apple Neural Engine acceleration via CoreML. The encoder bundle is downloaded
-# automatically at runtime (see in-app Download button). Faster than Metal on
-# audio >3s; encoder runs on the Apple Neural Engine.
-coreml = ["whisper", "whisper-rs/coreml"]
-# NVIDIA GPU acceleration for Whisper. Requires the CUDA toolkit (nvcc) at build
-# time. Enable alongside `whisper`, e.g. `--features whisper,cuda`.
-cuda = ["whisper-rs/cuda"]
-# AMD/Intel/cross-vendor GPU acceleration via Vulkan. Alternative to `cuda`.
-vulkan = ["whisper-rs/vulkan"]
+# Apple Neural Engine acceleration via CoreML. Implies `whisper`. macOS only.
+# The encoder bundle is downloaded at runtime via the in-app Download button.
+coreml = ["whisper", "whisper-rs/coreml", "dep:zip"]
+# NVIDIA GPU acceleration. Implies `whisper`. Requires the CUDA toolkit (nvcc)
+# at build time. Linux/Windows only.
+cuda = ["whisper", "whisper-rs/cuda"]
+# AMD/Intel/NVIDIA GPU acceleration via Vulkan. Implies `whisper`.
+# Linux/Windows only.
+vulkan = ["whisper", "whisper-rs/vulkan"]
+
+# ---- Platform presets -------------------------------------------------------
+# One flag per shipping target. These are the flags release builds should use;
+# each expands to exactly the capabilities that platform supports, and
+# src/platform.rs rejects impossible OS/backend combinations at compile time,
+# so a preset can never leave another platform's code in the binary.
+platform-macos = ["whisper", "metal", "coreml"]
+platform-linux-cuda = ["whisper", "cuda"]
+platform-linux-vulkan = ["whisper", "vulkan"]
+platform-linux-cpu = ["whisper"]
+platform-windows-cuda = ["whisper", "cuda"]
+platform-windows-vulkan = ["whisper", "vulkan"]
+platform-windows-cpu = ["whisper"]
 
 [profile.release]
 codegen-units = 1

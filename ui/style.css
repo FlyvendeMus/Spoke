@@ -308,6 +308,55 @@ body {
   color: var(--muted);
 }
 
+/* ---- Permission warnings ---- */
+/* Amber "!" dot floating on the bubble's top-right corner. */
+.perm-badge {
+  position: absolute;
+  right: -3px;
+  bottom: calc(var(--bubble) - 12px);
+  z-index: 3;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  background: #ffb020;
+  color: #08080c;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+  box-shadow: 0 0 6px rgba(255, 176, 32, 0.6);
+}
+
+/* Banner at the top of the settings panel, one row per missing permission. */
+.perm-warning {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border: 1px solid rgba(255, 176, 32, 0.4);
+  background: rgba(255, 176, 32, 0.08);
+  padding: 5px 6px;
+  margin: 6px 0 2px;
+  font-size: 10px;
+  color: #ffb020;
+  line-height: 1.4;
+}
+.perm-warning .perm-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+.perm-warning .mini-btn {
+  flex-shrink: 0;
+  color: #ffb020;
+  border-color: rgba(255, 176, 32, 0.4);
+}
+.perm-warning .mini-btn:hover {
+  border-color: #ffb020;
+}
+
 /* ---- History panel ---- */
 .history-header {
   cursor: pointer;
