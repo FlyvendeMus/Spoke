@@ -29,7 +29,6 @@ const fields = {
 };
 
 let config = null;
-let amplitude = 0;
 let recording = false;
 let modelDownloading = false;
 let coremlDownloading = false;
@@ -102,7 +101,10 @@ async function checkPermissions() {
   renderPermissionWarnings();
 }
 
-// ── Mosaic canvas setup ───────────────────────────────────────────────────
+// ── Mosaic shape canvas ────────────────────────────────────────────────────
+// Organic tile-mosaic blob on a transparent canvas — the tile alpha defines
+// the silhouette (no containing circle). Each state morphs the boundary and
+// palette; motion is procedural only (no audio input).
 const S   = 48;
 const dpr = Math.min(window.devicePixelRatio || 1, 2);
 ring.width  = S * dpr;
@@ -111,34 +113,57 @@ const mCtx  = ring.getContext('2d');
 mCtx.scale(dpr, dpr);
 
 const COLS = 13;
-const ROWS = 13;
-const cellW = S / COLS;
-const cellH = S / ROWS;
-const GAP   = 1.2;
+const cell = S / COLS;
+const GAP  = cell * 0.14;
+const EDGE_SOFT = 1.6; // px of alpha falloff at the shape boundary
+const STAR_PTS  = 6;
+const CX = S / 2;
+const CY = S / 2;
 
-const MOSAIC_PALETTES = {
-  idle:       { bg: [16, 10, 44],  fg: [130, 100, 255] },
-  listening:  { bg: [44, 10, 22],  fg: [255, 108,  75] },
-  processing: { bg: [ 8, 32, 44],  fg: [ 38, 212, 196] },
+// Per-state palette + boundary parameters (radii in px at 48px scale).
+const MODES = {
+  idle: {
+    pal: { bg: [10, 10, 12], fg: [228, 228, 234] },
+    shape: { baseR: 17.5, blobAmp: 0.045, blobSpeed: 0.7, starAmp: 0, starSpeed: 0.5, breathAmp: 0.028, breathSpeed: 0.9, jitterAmp: 0 },
+  },
+  listening: {
+    pal: { bg: [44, 10, 22], fg: [255, 108, 75] },
+    shape: { baseR: 18.5, blobAmp: 0.105, blobSpeed: 2.7, starAmp: 0, starSpeed: 0.5, breathAmp: 0.055, breathSpeed: 3.4, jitterAmp: 0 },
+  },
+  processing: {
+    pal: { bg: [8, 32, 44], fg: [38, 212, 196] },
+    shape: { baseR: 17, blobAmp: 0.020, blobSpeed: 1.0, starAmp: 0.095, starSpeed: 1.7, breathAmp: 0.015, breathSpeed: 1.2, jitterAmp: 0 },
+  },
 };
+const ERROR_PAL = { bg: [46, 26, 6], fg: [255, 186, 46] };
 
 let mosaicT    = 0;
 let mosaicPrev = performance.now();
-let smoothedAmp = 0;
 
-let fromState  = 'idle';
-let toState    = 'idle';
-let transP     = 1;
-const TRANS_DUR = 0.55;
+// Animated state — mode weights and shape params are lerped every frame so
+// state changes morph instead of cutting.
+const shapeP = Object.assign({}, MODES.idle.shape);
+const modeW  = { idle: 1, listening: 0, processing: 0 };
+let errB = 0;                 // error blend 0..1 (overlays any mode)
+let press = 0;                // squish spring on press
+let pressTarget = 0;
+let pressT = -10;             // time of last press (drives the ripple)
+let popT = -10;               // time processing finished (drives the "spit" pop)
+// Phase accumulators so speed changes never make the motion jump.
+let phB = 0, phBr = 0, phSt = 0;
+
+const lerp    = (a, b, k) => a + (b - a) * k;
+const clamp01 = (x) => (x < 0 ? 0 : x > 1 ? 1 : x);
 
 // Reused per-frame color buffers (see drawMosaic) — module-level to avoid
 // allocating on every animation frame.
 const bbg = [0, 0, 0];
 const bfg = [0, 0, 0];
 
-// Idle ambient animation is throttled to this rate; listening/processing run at
-// full refresh for audio-reactive smoothness. Continuous 60fps full-canvas
-// redraws when idle are the main driver of WebKit web-process memory/CPU.
+// Ambient animation is throttled to this rate once the idle state has fully
+// settled; transitions, listening/processing, error, and the press spring run
+// at full refresh. Continuous 60fps full-canvas redraws when idle are the main
+// driver of WebKit web-process memory/CPU.
 const IDLE_INTERVAL = 1000 / 20;
 let lastFrame = 0;
 
@@ -154,14 +179,26 @@ const BUBBLE_W = 80;
 const BUBBLE_H = 80;
 const MARGIN = 24;
 
-/// Keep the bubble's bottom‑right corner fixed on screen by repositioning the
-/// window after a size change.  The formulas mirror position_bubble() in Rust.
-async function resizeAndReposition(w, h) {
-  const sw = window.screen.width;
-  const sh = window.screen.height;
+/// Resize while keeping the bubble visually fixed: the bubble sits at the
+/// window's bottom-right corner, so anchor that corner to wherever the window
+/// currently is (the user may have dragged it anywhere on screen).
+/// `initial` places the window at the screen's bottom-right instead — used
+/// once at boot, mirroring position_bubble() in Rust.
+async function resizeAndReposition(w, h, initial = false) {
   try {
+    let right, bottom;
+    if (initial) {
+      right = window.screen.width - MARGIN;
+      bottom = window.screen.height - MARGIN;
+    } else {
+      const factor = await appWindow.scaleFactor();
+      const pos = (await appWindow.outerPosition()).toLogical(factor);
+      const size = (await appWindow.outerSize()).toLogical(factor);
+      right = pos.x + size.width;
+      bottom = pos.y + size.height;
+    }
     await appWindow.setSize(new LOGICAL_SIZE(w, h));
-    await appWindow.setPosition(new LOGICAL_POS(sw - w - MARGIN, sh - h - MARGIN));
+    await appWindow.setPosition(new LOGICAL_POS(right - w, bottom - h));
   } catch (_) { /* best‑effort — some platforms may lack the API */ }
 }
 
@@ -367,118 +404,207 @@ recordBtn.addEventListener("click", (e) => {
 
 function setBubbleState(state, message) {
   const wasDragging = bubble.classList.contains("dragging");
+  const wasProcessing = bubble.classList.contains("processing");
   bubble.className = state;
   if (wasDragging) bubble.classList.add("dragging");
+  // Processing → idle means transcription landed and typing begins: fire the
+  // "spit" pop so the bubble visibly reacts to finishing.
+  if (wasProcessing && state === "idle") popT = mosaicT;
   recording = state === "recording";
   if (state === "error" && message) flash(message);
 }
 
-function waveV(state, nx, ny, dist, angle, hash, col) {
-  if (state === 'idle') {
-    return 0.22
-      + 0.18 * Math.sin(mosaicT * 0.55 + nx * 4.0 + ny * 2.5 + hash * 1.5)
-      + 0.08 * Math.sin(mosaicT * 0.40 + nx * 1.5 - ny * 3.0 + hash * 2.0);
-  } else if (state === 'listening') {
-    const r1    = Math.sin(mosaicT * 2.8  - dist * 4.5);
-    const r2    = Math.sin(mosaicT * 3.10 - dist * 5.5 + 2.1);
-    const flick = Math.abs(Math.sin(mosaicT * 5.5 + col * 1.1))
-                * Math.max(0, 1 - dist * 1.6) * 0.10;
-    const bloom = smoothedAmp * Math.max(0, 1 - dist * 1.8) * 0.55;
-    return 0.08
-      + Math.max(0, r1) * (0.42 + smoothedAmp * 0.22)
-      + Math.max(0, r2) * (0.24 + smoothedAmp * 0.14)
-      + flick
-      + bloom;
-  } else {
-    const wA = Math.sin(mosaicT * 1.6 + angle * 3 + dist * 6);
-    const wB = Math.sin(mosaicT * 2.4 - dist * 8  + angle * 2);
-    return 0.10
-      + (wA * 0.5 + 0.5) * 0.38
-      + (wB * 0.5 + 0.5) * 0.30;
+// Advance mode weights, error blend, press spring, and shape params.
+function mosaicStep(dt) {
+  const mode = bubble.classList.contains('recording') ? 'listening'
+             : bubble.classList.contains('processing') ? 'processing'
+             : 'idle';
+  const isError = bubble.classList.contains('error');
+  const k  = 1 - Math.exp(-dt * 4);
+  const k2 = 1 - Math.exp(-dt * 5);
+
+  let sum = 0;
+  for (const m in modeW) {
+    modeW[m] = lerp(modeW[m], mode === m ? 1 : 0, k2);
+    sum += modeW[m];
   }
+  for (const m in modeW) modeW[m] /= sum;
+
+  errB = lerp(errB, isError ? 1 : 0, k);
+
+  // Press spring: fast attack, softer release.
+  const pk = 1 - Math.exp(-dt * (pressTarget > press ? 22 : 8));
+  press = lerp(press, pressTarget, pk);
+
+  for (const key in shapeP) {
+    let v = 0;
+    for (const m in modeW) v += MODES[m].shape[key] * modeW[m];
+    if (errB > 0.001) {
+      if (key === 'jitterAmp')   v = lerp(v, 0.06, errB);
+      if (key === 'breathAmp')   v = lerp(v, 0.06, errB);
+      if (key === 'breathSpeed') v = lerp(v, 5.2, errB);
+    }
+    shapeP[key] = lerp(shapeP[key], v, k);
+  }
+
+  phB  += shapeP.blobSpeed   * dt;
+  phBr += shapeP.breathSpeed * dt;
+  phSt += shapeP.starSpeed   * dt;
+}
+
+// Organic boundary radius at angle th.
+function shapeR(th) {
+  const p = shapeP;
+  const blob = Math.sin(th * 3 + phB) * 0.5
+             + Math.sin(th * 5 - phB * 1.37 + 1.7) * 0.30
+             + Math.sin(th * 2 + phB * 0.80 + 4.2) * 0.35;
+  const star   = Math.cos(th * STAR_PTS - phSt);
+  const jag    = Math.sin(th * 9 + mosaicT * 6) * Math.sin(th * 13 - mosaicT * 7.3);
+  const breath = Math.sin(phBr);
+  return p.baseR * (1 + p.breathAmp * breath + p.blobAmp * blob + p.starAmp * star + p.jitterAmp * jag);
 }
 
 function drawMosaic(now) {
   const dt   = Math.min((now - mosaicPrev) / 1000, 0.05);
   mosaicT   += dt;
   mosaicPrev = now;
-
-  // Envelope follower: fast attack (~100ms), slow release (~800ms)
-  smoothedAmp += (amplitude - smoothedAmp) * (amplitude > smoothedAmp ? 0.20 : 0.04);
-  amplitude   *= 0.9;
-
-  // Detect state change → start transition
-  const ms = bubble.classList.contains('recording') ? 'listening'
-           : bubble.classList.contains('processing') ? 'processing'
-           : 'idle';
-  if (ms !== toState) {
-    fromState = toState;
-    toState   = ms;
-    transP    = 0;
-  }
-
-  // Advance + ease transition progress
-  if (transP < 1) transP = Math.min(1, transP + dt / TRANS_DUR);
-  const ease = transP < 0.5
-    ? 2 * transP * transP
-    : -1 + (4 - 2 * transP) * transP;
+  mosaicStep(dt);
 
   // Blend palettes once per frame. Reuse module-level arrays (bbg/bfg) instead
-  // of allocating two new arrays every frame — avoids GC churn that inflates the
-  // WebKit web process heap under the continuous animation loop.
-  const pF = MOSAIC_PALETTES[fromState];
-  const pT = MOSAIC_PALETTES[toState];
-  bbg[0] = pF.bg[0] + (pT.bg[0] - pF.bg[0]) * ease;
-  bbg[1] = pF.bg[1] + (pT.bg[1] - pF.bg[1]) * ease;
-  bbg[2] = pF.bg[2] + (pT.bg[2] - pF.bg[2]) * ease;
-  bfg[0] = pF.fg[0] + (pT.fg[0] - pF.fg[0]) * ease;
-  bfg[1] = pF.fg[1] + (pT.fg[1] - pF.fg[1]) * ease;
-  bfg[2] = pF.fg[2] + (pT.fg[2] - pF.fg[2]) * ease;
+  // of allocating on every frame — avoids GC churn that inflates the WebKit
+  // web process heap under the continuous animation loop.
+  bbg[0] = bbg[1] = bbg[2] = 0;
+  bfg[0] = bfg[1] = bfg[2] = 0;
+  for (const m in modeW) {
+    const pal = MODES[m].pal;
+    for (let i = 0; i < 3; i++) {
+      bbg[i] += pal.bg[i] * modeW[m];
+      bfg[i] += pal.fg[i] * modeW[m];
+    }
+  }
+  for (let i = 0; i < 3; i++) {
+    bbg[i] = lerp(bbg[i], ERROR_PAL.bg[i], errB * 0.85);
+    bfg[i] = lerp(bfg[i], ERROR_PAL.fg[i], errB * 0.85);
+  }
 
-  mCtx.fillStyle = `rgb(${bbg[0]|0},${bbg[1]|0},${bbg[2]|0})`;
-  mCtx.fillRect(0, 0, S, S);
+  // Transparent outside the blob — everything beyond the boundary stays clear.
+  mCtx.clearRect(0, 0, S, S);
 
-  for (let row = 0; row < ROWS; row++) {
+  const wI = modeW.idle, wL = modeW.listening, wP = modeW.processing;
+  // Damped-spring "spit" when processing finishes: quick outward push that
+  // rebounds and settles (~0.9s), plus a bright ripple in the tile loop.
+  const popAge = mosaicT - popT;
+  const pop = popAge >= 0 && popAge < 1
+    ? Math.exp(-popAge * 4.5) * Math.sin(popAge * 14)
+    : 0;
+  const sx = 1 + press * 0.09 + pop * 0.08;
+  const sy = 1 - press * 0.13 + pop * 0.13;
+  const pressAge = mosaicT - pressT;
+  const blink = Math.pow(Math.max(0, Math.sin(mosaicT * 3.2)), 3);
+
+  // Fill the silhouette with the background palette color first so the gaps
+  // between tiles read as part of the blob instead of showing the desktop
+  // through. Trace the boundary once and reuse the path for the outline.
+  const N = 64;
+  const path = new Path2D();
+  for (let i = 0; i <= N; i++) {
+    const th = (i / N) * Math.PI * 2;
+    const R = shapeR(th);
+    const X = CX + Math.cos(th) * R * sx;
+    const Y = CY + Math.sin(th) * R * sy;
+    if (i === 0) path.moveTo(X, Y);
+    else path.lineTo(X, Y);
+  }
+  path.closePath();
+  mCtx.fillStyle = `rgb(${bbg[0] | 0},${bbg[1] | 0},${bbg[2] | 0})`;
+  mCtx.fill(path);
+  // Clip the tiles to the silhouette so partially-faded edge tiles never
+  // poke past the boundary (they read as grey stubs on light desktops).
+  mCtx.save();
+  mCtx.clip(path);
+
+  for (let row = 0; row < COLS; row++) {
     for (let col = 0; col < COLS; col++) {
-      const nx    = col / (COLS - 1);
-      const ny    = row / (ROWS - 1);
-      const dx    = nx - 0.5;
-      const dy    = ny - 0.5;
-      const dist  = Math.sqrt(dx * dx + dy * dy) * Math.SQRT2;
-      const angle = Math.atan2(dy, dx);
-      const hash  = ((col * 7 + row * 13) % 31) / 31;
+      const x = col * cell + cell / 2;
+      const y = row * cell + cell / 2;
+      const dx = (x - CX) / sx;
+      const dy = (y - CY) / sy;
+      const th = Math.atan2(dy, dx);
+      const d  = Math.sqrt(dx * dx + dy * dy);
+      const R  = shapeR(th);
+      const a  = clamp01((R - d) / EDGE_SOFT + 0.5);
+      if (a < 0.02) continue;
 
-      const vF = Math.min(1, Math.max(0, waveV(fromState, nx, ny, dist, angle, hash, col)));
-      const vT = Math.min(1, Math.max(0, waveV(toState,   nx, ny, dist, angle, hash, col)));
-      const v  = vF + (vT - vF) * ease;
+      const distN = clamp01(d / R);
+      const nx = x / S;
+      const ny = y / S;
+      const hash = ((col * 7 + row * 13) % 31) / 31;
+
+      let v = 0;
+      if (wI > 0.02) {
+        v += wI * (0.22
+          + 0.18 * Math.sin(mosaicT * 0.55 + nx * 4.0 + ny * 2.5 + hash * 1.5)
+          + 0.08 * Math.sin(mosaicT * 0.40 + nx * 1.5 - ny * 3.0 + hash * 2.0));
+      }
+      if (wL > 0.02) {
+        const r1 = Math.sin(mosaicT * 2.8 - distN * 4.5);
+        const r2 = Math.sin(mosaicT * 3.1 - distN * 5.5 + 2.1);
+        const fl = Math.abs(Math.sin(mosaicT * 5.5 + col * 1.1)) * Math.max(0, 1 - distN * 1.6);
+        v += wL * (0.08 + Math.max(0, r1) * 0.52 + Math.max(0, r2) * 0.30 + fl * 0.15);
+      }
+      if (wP > 0.02) {
+        const waveA = Math.sin(mosaicT * 1.6 + th * 3 + distN * 6);
+        const waveB = Math.sin(mosaicT * 2.4 - distN * 8 + th * 2);
+        v += wP * (0.10 + (waveA * 0.5 + 0.5) * 0.38 + (waveB * 0.5 + 0.5) * 0.30);
+      }
+      if (errB > 0.02) {
+        const ve = 0.12 + Math.max(0, Math.sin(mosaicT * 5 - distN * 4)) * 0.55 + blink * 0.35;
+        v = lerp(v, ve, errB * 0.85);
+      }
+      // Press ripple radiating outward from the click.
+      if (pressAge < 0.8) {
+        const band = Math.max(0, 1 - Math.abs(distN * 1.15 - pressAge * 1.9) * 5) * (1 - pressAge / 0.8);
+        v += band * 0.6;
+      }
+      // Brighter, faster ripple for the done-processing spit.
+      if (popAge >= 0 && popAge < 0.7) {
+        const band = Math.max(0, 1 - Math.abs(distN * 1.15 - popAge * 2.4) * 4) * (1 - popAge / 0.7);
+        v += band * 0.85;
+      }
+      v = clamp01(v);
 
       const ir = Math.round(bbg[0] + (bfg[0] - bbg[0]) * v);
       const ig = Math.round(bbg[1] + (bfg[1] - bbg[1]) * v);
       const ib = Math.round(bbg[2] + (bfg[2] - bbg[2]) * v);
-
       const sz = 0.68 + v * 0.32;
-      const cw = (cellW - GAP) * sz;
-      const ch = (cellH - GAP) * sz;
-
+      const cw = (cell - GAP) * sz;
+      mCtx.globalAlpha = a;
       mCtx.fillStyle = `rgb(${ir},${ig},${ib})`;
-      mCtx.fillRect(
-        col * cellW + GAP / 2 + (cellW - GAP - cw) / 2,
-        row * cellH + GAP / 2 + (cellH - GAP - ch) / 2,
-        cw, ch
-      );
+      mCtx.fillRect(x - cw / 2, y - cw / 2, cw, cw);
     }
   }
+  mCtx.globalAlpha = 1;
+  mCtx.restore();
+
+  // Soft outline tracing the boundary — helps the silhouette read against
+  // busy desktop backgrounds.
+  const baseA = 0.34 + errB * blink * 0.45;
+  mCtx.lineWidth = 1;
+  mCtx.strokeStyle = `rgba(${bfg[0] | 0},${bfg[1] | 0},${bfg[2] | 0},${baseA.toFixed(3)})`;
+  mCtx.stroke(path);
 }
 
 // Animation driver: always schedules the next frame, but skips the actual draw
 // when the window is hidden (occluded/minimized) and throttles to IDLE_INTERVAL
-// while idle. During state transitions and listening/processing it runs at full
-// refresh so the audio-reactive visuals stay smooth.
+// once the idle state has fully settled. Transitions, active states, error,
+// and the press spring run at full refresh so the morphing stays smooth.
 function tick(now) {
   requestAnimationFrame(tick);
   if (document.hidden) return;
-  const idle = toState === 'idle' && transP >= 1;
-  if (idle && now - lastFrame < IDLE_INTERVAL) return;
+  const settled = modeW.idle > 0.995 && errB < 0.005 &&
+                  press < 0.01 && pressTarget === 0 &&
+                  mosaicT - popT > 1.2;
+  if (settled && now - lastFrame < IDLE_INTERVAL) return;
   lastFrame = now;
   drawMosaic(now);
 }
@@ -488,10 +614,6 @@ function tick(now) {
 listen("spoke:state", (e) => {
   const { state, message } = e.payload;
   setBubbleState(state, message);
-});
-
-listen("spoke:amplitude", (e) => {
-  amplitude = Math.min(1, Math.sqrt(e.payload) * 1.6);
 });
 
 listen("spoke:transcript", (e) => {
@@ -562,6 +684,9 @@ bubble.addEventListener("pointerdown", (e) => {
   e.stopPropagation();
   dragOrigin = { x: e.screenX, y: e.screenY };
   didDrag = false;
+  // Squish the blob while held (see press spring in mosaicStep).
+  pressTarget = 1;
+  pressT = mosaicT;
 });
 
 window.addEventListener("pointermove", (e) => {
@@ -580,6 +705,7 @@ bubble.addEventListener("pointerup", (e) => {
   if (e.button !== 0) return;
   // Always reset drag state on release so it can never go stale.
   dragOrigin = null;
+  pressTarget = 0;
   bubble.classList.remove("dragging");
   if (didDrag) {
     didDrag = false;
@@ -601,7 +727,15 @@ bubble.addEventListener("pointerup", (e) => {
 window.addEventListener("pointercancel", () => {
   dragOrigin = null;
   didDrag = false;
+  pressTarget = 0;
   bubble.classList.remove("dragging");
+});
+
+// Release the squish if the pointer slides off the bubble mid-press,
+// but not during an active drag (the pointer may leave the small bubble
+// element while the window drag is still in flight).
+bubble.addEventListener("pointerleave", () => {
+  if (!didDrag) pressTarget = 0;
 });
 
 // ---- Form wiring + boot -------------------------------------------------
@@ -843,7 +977,7 @@ async function init() {
   setInterval(checkPermissions, 15000);
   requestAnimationFrame(tick);
   // Window starts at 320×320; shrink to bubble-only size immediately.
-  resizeAndReposition(BUBBLE_W, BUBBLE_H);
+  resizeAndReposition(BUBBLE_W, BUBBLE_H, true);
 }
 
 init();
