@@ -27,6 +27,60 @@ pub enum AudioFormat {
     Flac,
 }
 
+/// Where the transcript goes: typed via keystroke injection, copied to the
+/// clipboard, or both. Deserializes from the legacy `copy_to_clipboard` bool
+/// key too (false -> Type, true -> Copy) so old config files keep working.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputDest {
+    Type,
+    Copy,
+    Both,
+}
+
+impl OutputDest {
+    pub fn types(self) -> bool {
+        matches!(self, OutputDest::Type | OutputDest::Both)
+    }
+    pub fn copies(self) -> bool {
+        matches!(self, OutputDest::Copy | OutputDest::Both)
+    }
+}
+
+impl Serialize for OutputDest {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let s = match self {
+            OutputDest::Type => "type",
+            OutputDest::Copy => "copy",
+            OutputDest::Both => "both",
+        };
+        serializer.serialize_str(s)
+    }
+}
+
+impl<'de> Deserialize<'de> for OutputDest {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Repr {
+            Legacy(bool),
+            Named(String),
+        }
+        Ok(match Repr::deserialize(deserializer)? {
+            Repr::Legacy(true) => OutputDest::Copy,
+            Repr::Legacy(false) => OutputDest::Type,
+            Repr::Named(s) if s == "copy" => OutputDest::Copy,
+            Repr::Named(s) if s == "both" => OutputDest::Both,
+            Repr::Named(_) => OutputDest::Type,
+        })
+    }
+}
+
+impl Default for OutputDest {
+    fn default() -> Self {
+        OutputDest::Type
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct General {
@@ -35,8 +89,9 @@ pub struct General {
     pub trigger: Trigger,
     /// "auto" | BCP-47 code ("en", "da", ...).
     pub language: String,
-    /// When true, copy transcribed text to clipboard instead of injecting.
-    pub copy_to_clipboard: bool,
+    /// Where the transcript goes: "type" | "copy" | "both".
+    #[serde(alias = "copy_to_clipboard")]
+    pub output_dest: OutputDest,
 }
 
 /// Platform-appropriate default hotkey: Cmd+Shift+S on macOS, Ctrl+Alt+Space elsewhere.
@@ -55,7 +110,7 @@ impl Default for General {
             hotkey: default_hotkey(),
             trigger: Trigger::PushToTalk,
             language: "auto".into(),
-            copy_to_clipboard: false,
+            output_dest: OutputDest::Type,
         }
     }
 }
@@ -63,7 +118,7 @@ impl Default for General {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Offline {
-    /// "tiny" | "base" | "small" | "large-v3-turbo"
+    /// "tiny" | "base" | "small" | "medium" | "large-v3-turbo" | "large-v3"
     pub model: String,
     pub use_gpu: bool,
     /// Acceleration backend: "auto" | "metal" | "coreml" | "cuda" | "vulkan" | "none".
@@ -260,6 +315,31 @@ mod tests {
         let toml = "[offline]\nmac_accel = \"metal\"\n";
         let c: Config = toml::from_str(toml).unwrap();
         assert_eq!(c.offline.accel, "metal");
+    }
+
+    #[test]
+    fn legacy_copy_to_clipboard_bool_still_parses() {
+        let toml = "[general]\ncopy_to_clipboard = true\n";
+        let c: Config = toml::from_str(toml).unwrap();
+        assert_eq!(c.general.output_dest, OutputDest::Copy);
+
+        let toml = "[general]\ncopy_to_clipboard = false\n";
+        let c: Config = toml::from_str(toml).unwrap();
+        assert_eq!(c.general.output_dest, OutputDest::Type);
+    }
+
+    #[test]
+    fn output_dest_both_round_trips() {
+        let mut c = Config::default();
+        c.general.output_dest = OutputDest::Both;
+        let dir = std::env::temp_dir().join(format!("spoke-test-both-{}", std::process::id()));
+        let path = dir.join("spoke.toml");
+        c.save_to(&path).unwrap();
+        let loaded = Config::load_from(&path).unwrap();
+        assert_eq!(loaded.general.output_dest, OutputDest::Both);
+        assert!(loaded.general.output_dest.types());
+        assert!(loaded.general.output_dest.copies());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

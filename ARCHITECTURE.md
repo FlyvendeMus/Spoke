@@ -24,8 +24,9 @@ STT engine (one of two, chosen by config):
         ↓
 transcript: String
         ↓
-   ├─ enigo types it into the focused window   (default)
-   └─ or copied to the clipboard               (copy_to_clipboard = true)
+   ├─ enigo types it into the focused window   (output_dest = "type", default)
+   ├─ copied to the clipboard                  (output_dest = "copy")
+   └─ or both                                  (output_dest = "both")
 ```
 
 The UI is a single transparent always-on-top Tauri window ("the bubble"),

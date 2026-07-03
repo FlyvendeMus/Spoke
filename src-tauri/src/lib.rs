@@ -462,11 +462,11 @@ async fn run_pipeline(app: &AppHandle, state: &Arc<SpokeState>, session: u64) ->
         return Ok(());
     }
 
-    let copy_mode = cfg.general.copy_to_clipboard;
+    let dest = cfg.general.output_dest;
 
     let _ = app.emit("spoke:transcript", serde_json::json!({ "text": &transcript }));
 
-    if copy_mode {
+    if dest.copies() {
         let text = transcript.clone();
         tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
             let mut cb = arboard::Clipboard::new()
@@ -478,7 +478,8 @@ async fn run_pipeline(app: &AppHandle, state: &Arc<SpokeState>, session: u64) ->
         })
         .await
         .map_err(|e| anyhow::anyhow!("clipboard task panicked: {e}"))??;
-    } else {
+    }
+    if dest.types() {
         // enigo is not Send; run it on a blocking thread.
         tokio::task::spawn_blocking(move || inject::inject_text(&transcript))
             .await

@@ -4,29 +4,12 @@ const appWindow = window.__TAURI__.window.getCurrentWindow();
 
 const $ = (id) => document.getElementById(id);
 
+const root = $("root");
 const bubble = $("bubble");
-const panel = $("panel");
 const ring = $("ring");
-const status = $("status");
-const hotkeyDisplay = $("hotkey");
-const recordBtn = $("recordHotkey");
-const closeBtn = $("closePanel");
-
-const accelBadge = $("accelBadge");
-
-const fields = {
-  mode: $("mode"),
-  trigger: $("trigger"),
-  language: $("language"),
-  model: $("model"),
-  accel: $("accel"),
-  apikey: $("apikey"),
-  saveAudio: $("saveAudio"),
-  savePath: $("savePath"),
-  saveMode: $("saveMode"),
-  micDevice: $("micDevice"),
-  copyToClipboard: $("copyToClipboard"),
-};
+const orbit = $("orbit");
+const subcard = $("subcard");
+const toast = $("toast");
 
 let config = null;
 let recording = false;
@@ -36,7 +19,6 @@ let buildInfo = null;
 
 let history = [];
 const MAX_HISTORY = 50;
-let historyVisible = false;
 
 // ---- Permission warnings --------------------------------------------------
 
@@ -54,21 +36,22 @@ function missingPermissions() {
   if (!permissions) return [];
   const missing = [];
   if (permissions.microphone === "denied") missing.push("microphone");
-  // Accessibility only matters for keystroke injection; clipboard mode doesn't
-  // use it, so don't nag about it there.
-  const injecting = !(config && config.general && config.general.copy_to_clipboard);
+  // Accessibility only matters for keystroke injection; pure clipboard mode
+  // doesn't use it, so don't nag about it there.
+  const injecting = !!(config && config.general && config.general.output_dest !== "copy");
   if (injecting && permissions.accessibility === "denied") missing.push("accessibility");
   return missing;
 }
 
 function renderPermissionWarnings() {
   const missing = missingPermissions();
-  const sig = missing.join(",");
+  const sig = missing.join(",") + "|" + menuState;
   if (sig === lastPermSig) return;
   lastPermSig = sig;
 
   permBadge.classList.toggle("hide", missing.length === 0);
-  permWarning.classList.toggle("hide", missing.length === 0);
+  // The warning card only has room while the menu is open.
+  permWarning.classList.toggle("hide", missing.length === 0 || menuState === "closed");
   permWarning.innerHTML = "";
   for (const key of missing) {
     const row = document.createElement("div");
@@ -167,134 +150,254 @@ const bfg = [0, 0, 0];
 const IDLE_INTERVAL = 1000 / 20;
 let lastFrame = 0;
 
-// ---- Panel close ---------------------------------------------------------
+// ---- Window sizing --------------------------------------------------------
 
 // Don't import LogicalSize from @tauri-apps/api/window — use the global.
 const LOGICAL_SIZE   = window.__TAURI__.window.LogicalSize;
 const LOGICAL_POS    = window.__TAURI__.window.LogicalPosition;
 
-const PANEL_W = 300;
-const PANEL_H = 360;
+const MENU_W = 340;
+const MENU_H = 430;
 const BUBBLE_W = 80;
 const BUBBLE_H = 80;
 const MARGIN = 24;
+const BUBBLE_HALF = BUBBLE_W / 2; // bubble centre sits this far inside its anchor corner
 
-/// Resize while keeping the bubble visually fixed: the bubble sits at the
-/// window's bottom-right corner, so anchor that corner to wherever the window
-/// currently is (the user may have dragged it anywhere on screen).
+// Which way the menu grows from the bubble. Default (both false): the bubble
+// anchors the window's bottom-right and the menu fans out up-left. When the
+// bubble sits too close to the screen's left/top edge for the menu to fit,
+// the axis flips and the menu grows the other way instead. The bubble itself
+// never moves — only the window grows around it.
+let flipX = false;
+let flipY = false;
+
+// Logical bounds of the monitor the window is on (falls back to window.screen).
+async function monitorBounds() {
+  try {
+    const mon = await window.__TAURI__.window.currentMonitor();
+    if (mon) {
+      const f = mon.scaleFactor;
+      return {
+        x: mon.position.x / f,
+        y: mon.position.y / f,
+        w: mon.size.width / f,
+        h: mon.size.height / f,
+      };
+    }
+  } catch (_) {}
+  return { x: 0, y: 0, w: window.screen.width, h: window.screen.height };
+}
+
+/// Resize while keeping the bubble's screen position fixed. Recomputes the
+/// grow direction per axis from where the bubble sits on its monitor, mirrors
+/// the layout via flip-x/flip-y on #root, then sizes and places the window so
+/// the bubble centre lands on the exact same screen pixel as before.
 /// `initial` places the window at the screen's bottom-right instead — used
 /// once at boot, mirroring position_bubble() in Rust.
 async function resizeAndReposition(w, h, initial = false) {
   try {
-    let right, bottom;
     if (initial) {
-      right = window.screen.width - MARGIN;
-      bottom = window.screen.height - MARGIN;
-    } else {
-      const factor = await appWindow.scaleFactor();
-      const pos = (await appWindow.outerPosition()).toLogical(factor);
-      const size = (await appWindow.outerSize()).toLogical(factor);
-      right = pos.x + size.width;
-      bottom = pos.y + size.height;
+      await appWindow.setSize(new LOGICAL_SIZE(w, h));
+      await appWindow.setPosition(
+        new LOGICAL_POS(window.screen.width - MARGIN - w, window.screen.height - MARGIN - h)
+      );
+      return;
     }
+    const factor = await appWindow.scaleFactor();
+    const pos = (await appWindow.outerPosition()).toLogical(factor);
+    const size = (await appWindow.outerSize()).toLogical(factor);
+    // Bubble centre on screen under the current layout — the fixed point.
+    const bx = pos.x + (flipX ? BUBBLE_HALF : size.width - BUBBLE_HALF);
+    const by = pos.y + (flipY ? BUBBLE_HALF : size.height - BUBBLE_HALF);
+
+    // Flip an axis when the menu wouldn't fit between the bubble and the
+    // monitor edge it normally grows toward.
+    const mon = await monitorBounds();
+    flipX = bx + BUBBLE_HALF - MENU_W < mon.x;
+    flipY = by + BUBBLE_HALF - MENU_H < mon.y;
+
+    root.classList.toggle("flip-x", flipX);
+    root.classList.toggle("flip-y", flipY);
+    buildOrbit();
+
+    const x = flipX ? bx - BUBBLE_HALF : bx + BUBBLE_HALF - w;
+    const y = flipY ? by - BUBBLE_HALF : by + BUBBLE_HALF - h;
     await appWindow.setSize(new LOGICAL_SIZE(w, h));
-    await appWindow.setPosition(new LOGICAL_POS(right - w, bottom - h));
+    await appWindow.setPosition(new LOGICAL_POS(x, y));
   } catch (_) { /* best‑effort — some platforms may lack the API */ }
 }
 
-// On Wayland, WebKitGTK does not re-commit a transparent, unfocused window's
-// surface on content change, so the panel's DOM state flips but the pixels do not
-// update until an unrelated ~20s refresh. `nudge_repaint` resizes the window by
-// 1px, forcing a surface reconfigure + commit that presents the new frame.
-function closePanel() {
-  panel.classList.add("hidden");
-  resizeAndReposition(BUBBLE_W, BUBBLE_H);
-  invoke("nudge_repaint");
+// ---- Orbit menu -----------------------------------------------------------
+// Sims-style radial menu: category bubbles fan out on two arcs around the
+// main bubble (which sits 40px from the window's bottom-right corner).
+// Angles are measured from screen-right: 90° = straight up, 180° = left.
+// Clicking a category opens a floating sub-card with chip controls.
+
+const BUBBLE_CX = 40; // main bubble centre, from the window's anchor corner
+
+const CATS = [
+  // Engine first and biggest: what model + acceleration is in use.
+  { id: "engine",   label: "Engine",   r: 101, angle: 98,  size: 65 },
+  { id: "hotkey",   label: "Hotkey",   r: 94,  angle: 135, size: 52 },
+  { id: "output",   label: "Output",   r: 94,  angle: 172, size: 52 },
+  { id: "language", label: "Language", r: 158, angle: 105, size: 50 },
+  { id: "mic",      label: "Mic",      r: 158, angle: 140, size: 50 },
+  { id: "history",  label: "History",  r: 158, angle: 175, size: 50 },
+];
+
+// 'closed' | 'ring' | one of the CATS ids (sub-menu open).
+let menuState = "closed";
+
+function buildOrbit() {
+  orbit.innerHTML = "";
+  CATS.forEach((cat, i) => {
+    const rad = (cat.angle * Math.PI) / 180;
+    const dx = cat.r * Math.cos(rad); // negative = left of the bubble
+    const dy = cat.r * Math.sin(rad); // positive = above the bubble
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "orbit-b";
+    b.dataset.cat = cat.id;
+    b.style.width = `${cat.size}px`;
+    b.style.height = `${cat.size}px`;
+    // Position from the bubble's anchor corner; flipped axes mirror the fan.
+    b.style[flipX ? "left" : "right"] = `${BUBBLE_CX - dx - cat.size / 2}px`;
+    b.style[flipY ? "top" : "bottom"] = `${BUBBLE_CX + dy - cat.size / 2}px`;
+    // Vector back to the main bubble's centre — the closed-state collapse.
+    // Screen-space, so it flips sign along a mirrored axis.
+    b.style.setProperty("--cx", `${flipX ? dx : -dx}px`);
+    b.style.setProperty("--cy", `${flipY ? -dy : dy}px`);
+    // Staggered pop-out; reverse order on collapse so the ring folds inward.
+    b.style.setProperty("--d", `${i * 45}ms`);
+    b.style.setProperty("--dr", `${(CATS.length - 1 - i) * 30}ms`);
+    // Idle bobbing, desynchronised per bubble.
+    b.style.setProperty("--bobDur", `${3.4 + i * 0.35}s`);
+    b.style.setProperty("--bobDel", `${-i * 0.7}s`);
+
+    const inner = document.createElement("span");
+    inner.className = "ob-inner";
+    inner.innerHTML = `
+      <span class="ob-label">${cat.label}</span>
+      <span class="ob-value" id="obv-${cat.id}">—</span>
+      ${cat.id === "engine" ? '<span class="ob-badge" id="obb-engine">—</span>' : ""}
+    `;
+    b.appendChild(inner);
+
+    b.addEventListener("pointerdown", (e) => e.stopPropagation());
+    b.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (menuState === cat.id) backToRing();
+      else openCat(cat.id);
+    });
+    orbit.appendChild(b);
+  });
 }
 
-function openPanel() {
-  panel.classList.remove("hidden");
-  resizeAndReposition(PANEL_W, PANEL_H);
+const MODEL_SHORT = { "large-v3-turbo": "turbo", "large-v3": "large" };
+const modelShort = (m) => MODEL_SHORT[m] || m;
+
+// Refresh the live values shown inside the orbit bubbles.
+function updateOrbitValues() {
+  if (!config) return;
+  const online = config.general.mode === "online";
+  $("obv-engine").textContent = online ? "online" : modelShort(config.offline.model);
+  const badge = $("obb-engine");
+  if (online) {
+    badge.textContent = "API";
+    badge.dataset.accel = "";
+  } else {
+    const label = getEffectiveAccel(config.offline.accel || "auto", buildInfo);
+    badge.textContent = label;
+    badge.dataset.accel = label;
+  }
+  $("obv-hotkey").textContent = config.general.hotkey || "—";
+  $("obv-language").textContent =
+    config.general.language === "auto" ? "Auto" : config.general.language.toUpperCase();
+  $("obv-output").textContent =
+    { type: "Type", copy: "Copy", both: "Both" }[config.general.output_dest] || "Type";
+  $("obv-mic").textContent = config.recording.input_device || "Default";
+  $("obv-history").textContent = String(history.length);
+}
+
+async function openRing() {
+  clearTimeout(closeTimer); // cancel a pending post-animation shrink
+  menuState = "ring";
+  // Grow the window (and rebuild the orbit for the current flip direction)
+  // before the pop-out plays, so the animation is never clipped.
+  await resizeAndReposition(MENU_W, MENU_H);
+  updateOrbitValues();
+  orbit.classList.remove("closed", "dimmed");
+  subcard.classList.add("hidden");
+  for (const b of orbit.children) b.classList.remove("active");
+  lastPermSig = null;
+  renderPermissionWarnings();
   invoke("nudge_repaint");
   // Re-check on open so the banner reflects grants made since the last poll.
   checkPermissions();
 }
 
-// Use pointerdown (fires before click) for reliability on Linux/GTK.
-closeBtn.addEventListener("pointerdown", (e) => {
-  e.stopPropagation();
-  e.preventDefault();
-  closePanel();
-});
+function openCat(id) {
+  menuState = id;
+  orbit.classList.add("dimmed");
+  for (const b of orbit.children) b.classList.toggle("active", b.dataset.cat === id);
+  renderCard(id);
+  subcard.classList.remove("hidden");
+  invoke("nudge_repaint");
+}
+
+function backToRing() {
+  menuState = "ring";
+  orbit.classList.remove("dimmed");
+  for (const b of orbit.children) b.classList.remove("active");
+  subcard.classList.add("hidden");
+  invoke("nudge_repaint");
+}
+
+let closeTimer = null;
+
+function closeMenu() {
+  if (capturing) endCapture();
+  menuState = "closed";
+  orbit.classList.add("closed");
+  orbit.classList.remove("dimmed");
+  subcard.classList.add("hidden");
+  lastPermSig = null;
+  renderPermissionWarnings();
+  invoke("nudge_repaint");
+  // Shrinking the window is what restores click-through around the bubble,
+  // but doing it immediately clips the collapse animation (0.45s spring +
+  // up to 150ms stagger). Wait for the fold to land, then shrink.
+  clearTimeout(closeTimer);
+  closeTimer = setTimeout(() => {
+    if (menuState === "closed") resizeAndReposition(BUBBLE_W, BUBBLE_H);
+  }, 650);
+}
 
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && !panel.classList.contains("hidden")) {
-    closePanel();
-  }
+  if (e.key !== "Escape" || capturing) return;
+  if (menuState === "ring") closeMenu();
+  else if (menuState !== "closed") backToRing();
 });
 
-// Close panel when clicking outside both the panel and the bubble.
+// Close the menu when clicking outside all of its pieces.
 document.addEventListener("pointerdown", (e) => {
-  if (panel.classList.contains("hidden")) return;
-  if (!panel.contains(e.target) && !bubble.contains(e.target)) {
-    closePanel();
+  if (menuState === "closed") return;
+  if (
+    !subcard.contains(e.target) &&
+    !orbit.contains(e.target) &&
+    !bubble.contains(e.target) &&
+    !permWarning.contains(e.target)
+  ) {
+    closeMenu();
   }
 });
+subcard.addEventListener("pointerdown", (e) => e.stopPropagation());
+permWarning.addEventListener("pointerdown", (e) => e.stopPropagation());
 
-// ---- Config <-> form ----------------------------------------------------
+// ---- Config ---------------------------------------------------------------
 
-function formFromConfig(c) {
-  fields.mode.value = c.general.mode;
-  fields.trigger.value = c.general.trigger;
-  fields.language.value = c.general.language;
-  fields.model.value = c.offline.model;
-  // The accel select is populated later by loadBuildInfo(), which re-applies
-  // the saved value once the options exist.
-  if (c.offline.accel) fields.accel.value = c.offline.accel;
-  fields.apikey.value = c.online.api_key;
-  fields.saveAudio.checked = c.recording.save_audio;
-  fields.savePath.value = c.recording.save_path;
-  fields.saveMode.value = c.recording.save_processed ? "processed" : "original";
-  fields.copyToClipboard.checked = c.general.copy_to_clipboard;
-  if (c.recording.input_device && fields.micDevice.querySelector(`option[value="${c.recording.input_device}"]`)) {
-    fields.micDevice.value = c.recording.input_device;
-  }
-  hotkeyDisplay.textContent = c.general.hotkey || "—";
-  applyModeVisibility(c.general.mode);
-}
-
-function configFromForm() {
-  const c = structuredClone(config);
-  c.general.mode = fields.mode.value;
-  c.general.trigger = fields.trigger.value;
-  c.general.language = fields.language.value;
-  c.offline.model = fields.model.value;
-  // Empty when the selector was never populated (CPU-only build) — keep the
-  // stored value rather than clobbering it.
-  if (fields.accel.value) c.offline.accel = fields.accel.value;
-  c.online.api_key = fields.apikey.value;
-  c.recording.save_audio = fields.saveAudio.checked;
-  c.recording.save_path = fields.savePath.value.trim();
-  c.recording.save_processed = fields.saveMode.value === "processed";
-  c.recording.input_device = fields.micDevice.value;
-  c.general.hotkey = config.general.hotkey;
-  c.general.copy_to_clipboard = fields.copyToClipboard.checked;
-  return c;
-}
-
-function applyModeVisibility(mode) {
-  const offline = mode === "offline";
-  document
-    .querySelectorAll(".offline-only")
-    .forEach((el) => el.classList.toggle("hide", !offline));
-  document
-    .querySelectorAll(".online-only")
-    .forEach((el) => el.classList.toggle("hide", offline));
-}
-
-async function pushConfig() {
-  config = configFromForm();
-  applyModeVisibility(config.general.mode);
+async function saveConfig() {
+  updateOrbitValues();
   try {
     await invoke("set_config", { newConfig: config });
     flash("Saved");
@@ -302,37 +405,436 @@ async function pushConfig() {
     flash(String(e));
   }
   // Clipboard mode toggles whether the Accessibility warning is relevant.
+  lastPermSig = null;
   renderPermissionWarnings();
 }
 
 let flashTimer = null;
 function flash(msg) {
-  status.textContent = msg;
+  toast.textContent = msg;
+  toast.classList.remove("hide");
   clearTimeout(flashTimer);
-  flashTimer = setTimeout(() => (status.textContent = ""), 2500);
+  flashTimer = setTimeout(() => toast.classList.add("hide"), 2500);
 }
 
-// ---- Microphone device list ---------------------------------------------
+// ---- Sub-menu cards ---------------------------------------------------------
+// Each card is a small template + wiring function. Dropdowns are replaced by
+// chip buttons: current value highlighted, one tap to change.
 
-async function populateMicDevices() {
+function cardShell(title, extra = "") {
+  return `
+    <header class="card-head">
+      <span class="card-title">${title}</span>
+      ${extra}
+      <button type="button" class="card-back" title="Back">&times;</button>
+    </header>
+    <div class="card-body"></div>
+  `;
+}
+
+// Build a row of chip buttons. opts: [{value, label, note?}]
+function chipRow(opts, selected, onPick) {
+  const wrap = document.createElement("div");
+  wrap.className = "chips";
+  for (const o of opts) {
+    const c = document.createElement("button");
+    c.type = "button";
+    c.className = "chip" + (o.value === selected ? " selected" : "");
+    c.innerHTML = o.note ? `${o.label}<span class="chip-note">${o.note}</span>` : o.label;
+    c.addEventListener("click", () => onPick(o.value));
+    wrap.appendChild(c);
+  }
+  return wrap;
+}
+
+function section(label) {
+  const sec = document.createElement("div");
+  sec.className = "card-sec";
+  if (label) {
+    const l = document.createElement("div");
+    l.className = "sec-label";
+    l.textContent = label;
+    sec.appendChild(l);
+  }
+  return sec;
+}
+
+const CARD_TITLES = {
+  engine: "Engine",
+  hotkey: "Hotkey",
+  language: "Language",
+  output: "Output",
+  mic: "Microphone",
+  history: "History",
+};
+
+function renderCard(id) {
+  const extra =
+    id === "engine" ? '<span class="muted" id="version">v0.1.0</span>' : "";
+  subcard.innerHTML = cardShell(CARD_TITLES[id], extra);
+  subcard.querySelector(".card-back").addEventListener("click", backToRing);
+  const body = subcard.querySelector(".card-body");
+  CARD_BUILDERS[id](body);
+  invoke("nudge_repaint");
+}
+
+// Re-render the currently open card in place (after a config change that
+// alters its own layout, e.g. switching offline/online).
+function rerenderCard() {
+  if (menuState !== "closed" && menuState !== "ring") renderCard(menuState);
+}
+
+// ---- Engine card: mode, model, acceleration -------------------------------
+
+function buildEngineCard(body) {
+  const modeSec = section("Mode");
+  modeSec.appendChild(
+    chipRow(
+      [
+        { value: "offline", label: "Offline" },
+        { value: "online", label: "Online" },
+      ],
+      config.general.mode,
+      async (v) => {
+        config.general.mode = v;
+        await saveConfig();
+        rerenderCard();
+      }
+    )
+  );
+  body.appendChild(modeSec);
+
+  if (config.general.mode === "online") {
+    const keySec = section("API key");
+    const input = document.createElement("input");
+    input.type = "password";
+    input.spellcheck = false;
+    input.value = config.online.api_key;
+    input.addEventListener("change", () => {
+      config.online.api_key = input.value;
+      saveConfig();
+    });
+    keySec.appendChild(input);
+    body.appendChild(keySec);
+    return;
+  }
+
+  // -- Offline: model choice + install state --
+  const modelSec = section("Model");
+  modelSec.appendChild(
+    chipRow(
+      [
+        { value: "tiny", label: "tiny" },
+        { value: "base", label: "base" },
+        { value: "small", label: "small" },
+        { value: "medium", label: "medium" },
+        { value: "large-v3-turbo", label: "turbo" },
+        { value: "large-v3", label: "large" },
+      ],
+      config.offline.model,
+      async (v) => {
+        if (modelDownloading) return;
+        config.offline.model = v;
+        await saveConfig();
+        rerenderCard();
+      }
+    )
+  );
+  const dl = document.createElement("div");
+  dl.className = "dl-row";
+  dl.innerHTML = `
+    <span id="modelStatus">…</span>
+    <button id="downloadModel" type="button" class="mini-btn hide">Download</button>
+  `;
+  modelSec.appendChild(dl);
+  body.appendChild(modelSec);
+  $("downloadModel").addEventListener("click", startModelDownload);
+
+  // -- Acceleration backend (only when the build offers a choice) --
+  const backends = (buildInfo && buildInfo.backends) || [];
+  if (buildInfo && buildInfo.whisper && backends.length > 1) {
+    const accelSec = section("Acceleration");
+    const opts = [
+      { value: "auto", label: `Auto`, note: buildInfo.acceleration },
+      ...backends.map((b) => ({ value: b.id, label: b.label })),
+    ];
+    const saved = config.offline.accel;
+    const selected =
+      saved === "auto" || backends.some((b) => b.id === saved) ? saved : "auto";
+    accelSec.appendChild(
+      chipRow(opts, selected || "auto", async (v) => {
+        config.offline.accel = v;
+        await saveConfig();
+        rerenderCard();
+        if (!modelDownloading) checkCurrentModel();
+      })
+    );
+    body.appendChild(accelSec);
+  } else if (buildInfo && !buildInfo.whisper) {
+    const note = section("Acceleration");
+    note.insertAdjacentHTML("beforeend", '<span class="muted">CPU (no whisper)</span>');
+    body.appendChild(note);
+  }
+
+  // -- CoreML bundle (Apple Neural Engine) --
+  if (coremlRelevant()) {
+    const cmSec = section("Neural engine bundle");
+    const row = document.createElement("div");
+    row.className = "dl-row";
+    row.title = "CoreML encoder (.mlmodelc) — enables Apple Neural Engine";
+    row.innerHTML = `
+      <span id="coremlStatus">…</span>
+      <button id="downloadCoreml" type="button" class="mini-btn hide">Download</button>
+    `;
+    cmSec.appendChild(row);
+    body.appendChild(cmSec);
+    $("downloadCoreml").addEventListener("click", startCoremlDownload);
+  }
+
+  if (!modelDownloading) checkCurrentModel();
+  else setModelStatusText(); // repopulate progress into the fresh DOM
+}
+
+// True when the given backend id was compiled into this build.
+function hasBackend(id) {
+  return !!(buildInfo && buildInfo.backends && buildInfo.backends.some((b) => b.id === id));
+}
+
+function coremlRelevant() {
+  const accel = config.offline.accel || "auto";
+  return hasBackend("coreml") && (accel === "coreml" || accel === "auto");
+}
+
+// Badge label for the currently selected accel value. "auto" resolves to the
+// build's best backend; unknown/stale ids fall back to CPU.
+function getEffectiveAccel(accel, info) {
+  if (!info) return "—";
+  if (!info.whisper) return "CPU";
+  if (accel === "auto" || !accel) return info.acceleration || "CPU";
+  const backend = (info.backends || []).find((b) => b.id === accel);
+  return backend ? backend.badge : "CPU";
+}
+
+async function loadBuildInfo() {
   try {
-    const devices = await invoke("list_audio_devices");
-    const sel = fields.micDevice;
-    sel.innerHTML = "";
-    const def = document.createElement("option");
-    def.value = "";
-    def.textContent = "Default";
-    sel.appendChild(def);
-    for (const d of devices) {
-      const opt = document.createElement("option");
-      opt.value = d;
-      opt.textContent = d;
-      sel.appendChild(opt);
-    }
+    buildInfo = await invoke("get_build_info");
+  } catch (_) {
+    buildInfo = null;
+  }
+  updateOrbitValues();
+}
+
+// ---- Hotkey card ------------------------------------------------------------
+
+function buildHotkeyCard(body) {
+  const trigSec = section("Trigger");
+  trigSec.appendChild(
+    chipRow(
+      [
+        { value: "push_to_talk", label: "Push to talk" },
+        { value: "toggle", label: "Toggle" },
+      ],
+      config.general.trigger,
+      async (v) => {
+        config.general.trigger = v;
+        await saveConfig();
+        rerenderCard();
+      }
+    )
+  );
+  body.appendChild(trigSec);
+
+  const hkSec = section("Shortcut");
+  const ctl = document.createElement("div");
+  ctl.className = "hotkey-ctl";
+  ctl.innerHTML = `
+    <span id="hotkey" class="hotkey-display">${config.general.hotkey || "—"}</span>
+    <button id="recordHotkey" type="button" class="mini-btn">Record</button>
+  `;
+  hkSec.appendChild(ctl);
+  body.appendChild(hkSec);
+  $("recordHotkey").addEventListener("click", (e) => {
+    e.stopPropagation();
+    startCapture();
+  });
+}
+
+// ---- Language card ----------------------------------------------------------
+
+function buildLanguageCard(body) {
+  const sec = section("Spoken language");
+  sec.appendChild(
+    chipRow(
+      [
+        { value: "auto", label: "Auto" },
+        { value: "en", label: "English" },
+        { value: "da", label: "Danish" },
+        { value: "de", label: "German" },
+        { value: "es", label: "Spanish" },
+        { value: "fr", label: "French" },
+      ],
+      config.general.language,
+      async (v) => {
+        config.general.language = v;
+        await saveConfig();
+        rerenderCard();
+      }
+    )
+  );
+  body.appendChild(sec);
+}
+
+// ---- Output card: destination + audio saving --------------------------------
+
+function buildOutputCard(body) {
+  const destSec = section("Destination");
+  destSec.appendChild(
+    chipRow(
+      [
+        { value: "type", label: "Type it out" },
+        { value: "copy", label: "Clipboard" },
+        { value: "both", label: "Both" },
+      ],
+      config.general.output_dest,
+      async (v) => {
+        config.general.output_dest = v;
+        await saveConfig();
+        rerenderCard();
+      }
+    )
+  );
+  body.appendChild(destSec);
+
+  const saveSec = section("Save audio");
+  saveSec.appendChild(
+    chipRow(
+      [
+        { value: "off", label: "Off" },
+        { value: "on", label: "On" },
+      ],
+      config.recording.save_audio ? "on" : "off",
+      async (v) => {
+        config.recording.save_audio = v === "on";
+        await saveConfig();
+        rerenderCard();
+      }
+    )
+  );
+  body.appendChild(saveSec);
+
+  if (config.recording.save_audio) {
+    const pathSec = section("Save path");
+    const input = document.createElement("input");
+    input.type = "text";
+    input.spellcheck = false;
+    input.value = config.recording.save_path;
+    input.addEventListener("change", () => {
+      config.recording.save_path = input.value.trim();
+      saveConfig();
+    });
+    pathSec.appendChild(input);
+    body.appendChild(pathSec);
+
+    const modeSec = section("Save which audio");
+    modeSec.appendChild(
+      chipRow(
+        [
+          { value: "original", label: "Original" },
+          { value: "processed", label: "Processed" },
+        ],
+        config.recording.save_processed ? "processed" : "original",
+        async (v) => {
+          config.recording.save_processed = v === "processed";
+          await saveConfig();
+          rerenderCard();
+        }
+      )
+    );
+    body.appendChild(modeSec);
+  }
+}
+
+// ---- Microphone card ----------------------------------------------------------
+
+async function buildMicCard(body) {
+  const sec = section("Input device");
+  sec.insertAdjacentHTML("beforeend", '<span class="muted">Loading…</span>');
+  body.appendChild(sec);
+  let devices = [];
+  try {
+    devices = await invoke("list_audio_devices");
   } catch (e) {
     console.error("Failed to list audio devices:", e);
   }
+  if (menuState !== "mic") return; // card changed while we were fetching
+  sec.querySelector(".muted").remove();
+  sec.appendChild(
+    chipRow(
+      [{ value: "", label: "Default" }, ...devices.map((d) => ({ value: d, label: d }))],
+      config.recording.input_device || "",
+      async (v) => {
+        config.recording.input_device = v;
+        await saveConfig();
+        rerenderCard();
+      }
+    )
+  );
 }
+
+// ---- History card ---------------------------------------------------------------
+
+async function copyToClipboard(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    flash("Copied");
+  } catch {
+    flash("Copy failed");
+  }
+}
+
+function buildHistoryCard(body) {
+  const list = document.createElement("div");
+  list.id = "historyList";
+  body.appendChild(list);
+  renderHistory();
+}
+
+function renderHistory() {
+  const list = $("historyList");
+  if (!list) return;
+  list.innerHTML = "";
+  if (history.length === 0) {
+    list.innerHTML = '<div class="history-empty">No transcriptions yet</div>';
+    return;
+  }
+  for (const entry of history) {
+    const row = document.createElement("div");
+    row.className = "history-entry";
+    const label = document.createElement("span");
+    label.className = "history-text";
+    label.textContent = entry.text;
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "mini-btn";
+    btn.textContent = "Copy";
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      copyToClipboard(entry.text);
+    });
+    row.appendChild(label);
+    row.appendChild(btn);
+    list.appendChild(row);
+  }
+}
+
+const CARD_BUILDERS = {
+  engine: buildEngineCard,
+  hotkey: buildHotkeyCard,
+  language: buildLanguageCard,
+  output: buildOutputCard,
+  mic: buildMicCard,
+  history: buildHistoryCard,
+};
 
 // ---- Hotkey recorder ----------------------------------------------------
 
@@ -366,17 +868,25 @@ let capturing = false;
 function startCapture() {
   if (capturing) return;
   capturing = true;
-  recordBtn.classList.add("recording");
-  recordBtn.textContent = "Press keys…";
-  hotkeyDisplay.classList.add("listening");
+  const btn = $("recordHotkey");
+  const disp = $("hotkey");
+  if (btn) {
+    btn.classList.add("recording");
+    btn.textContent = "Press keys…";
+  }
+  if (disp) disp.classList.add("listening");
   window.addEventListener("keydown", onCaptureKey, true);
 }
 
 function endCapture() {
   capturing = false;
-  recordBtn.classList.remove("recording");
-  recordBtn.textContent = "Record";
-  hotkeyDisplay.classList.remove("listening");
+  const btn = $("recordHotkey");
+  const disp = $("hotkey");
+  if (btn) {
+    btn.classList.remove("recording");
+    btn.textContent = "Record";
+  }
+  if (disp) disp.classList.remove("listening");
   window.removeEventListener("keydown", onCaptureKey, true);
 }
 
@@ -390,15 +900,11 @@ async function onCaptureKey(e) {
   const combo = comboFromEvent(e);
   if (!combo) return;
   config.general.hotkey = combo;
-  hotkeyDisplay.textContent = combo;
+  const disp = $("hotkey");
+  if (disp) disp.textContent = combo;
   endCapture();
-  await pushConfig();
+  await saveConfig();
 }
-
-recordBtn.addEventListener("click", (e) => {
-  e.stopPropagation();
-  startCapture();
-});
 
 // ---- Bubble state -------------------------------------------------------
 
@@ -621,57 +1127,153 @@ listen("spoke:transcript", (e) => {
   if (!text) return;
   history.unshift({ text, time: Date.now() });
   if (history.length > MAX_HISTORY) history.pop();
-  if (historyVisible) renderHistory();
+  if (menuState !== "closed") updateOrbitValues();
+  if (menuState === "history") renderHistory();
 });
 
-async function copyToClipboard(text) {
+// ---- Model download --------------------------------------------------
+// The status elements live inside the engine card, which may be closed while a
+// download runs — every DOM touch goes through null-safe helpers, and the
+// card re-populates from the download state when it re-opens.
+
+function setStat(id, text, cls) {
+  const el = $(id);
+  if (!el) return;
+  el.textContent = text;
+  el.className = cls ? cls : "";
+}
+
+let modelDlText = "";
+function setModelStatusText() {
+  if (modelDlText) setStat("modelStatus", modelDlText, "downloading");
+}
+
+async function checkCurrentModel() {
+  const model = config.offline.model;
+  setStat("modelStatus", "…", "");
+  $("downloadModel") && $("downloadModel").classList.add("hide");
   try {
-    await navigator.clipboard.writeText(text);
-    flash("Copied");
-  } catch {
-    flash("Copy failed");
+    const info = await invoke("check_model", { model });
+    if (model !== config.offline.model) return; // stale response
+    if (info.exists) {
+      setStat("modelStatus", "✓ installed", "installed");
+    } else {
+      setStat("modelStatus", "not downloaded", "");
+      $("downloadModel") && $("downloadModel").classList.remove("hide");
+    }
+    if (coremlRelevant()) updateCoremlStatus(info.coreml_exists);
+  } catch (_) {
+    setStat("modelStatus", "—", "");
   }
 }
 
-function renderHistory() {
-  const list = $("historyList");
-  list.innerHTML = "";
-  if (history.length === 0) {
-    list.innerHTML = '<div class="history-empty">No transcriptions yet</div>';
-    return;
-  }
-  for (const entry of history) {
-    const row = document.createElement("div");
-    row.className = "history-entry";
-    const label = document.createElement("span");
-    label.className = "history-text";
-    label.textContent = entry.text;
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.className = "mini-btn";
-    btn.textContent = "Copy";
-    btn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      copyToClipboard(entry.text);
-    });
-    row.appendChild(label);
-    row.appendChild(btn);
-    list.appendChild(row);
+function updateCoremlStatus(exists) {
+  if (exists) {
+    setStat("coremlStatus", "✓ installed", "installed");
+    $("downloadCoreml") && $("downloadCoreml").classList.add("hide");
+  } else {
+    setStat("coremlStatus", "not downloaded", "");
+    $("downloadCoreml") && $("downloadCoreml").classList.remove("hide");
   }
 }
 
-$("historyToggle").addEventListener("click", () => {
-  historyVisible = !historyVisible;
-  $("historySection").classList.toggle("hide", !historyVisible);
-  $("historyToggle").textContent = historyVisible ? "Hide" : "Show";
-  if (historyVisible) renderHistory();
+async function startModelDownload() {
+  if (modelDownloading) return;
+  const model = config.offline.model;
+  modelDownloading = true;
+  modelDlText = "0%";
+  const btn = $("downloadModel");
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = "…";
+  }
+  setStat("modelStatus", "0%", "downloading");
+  try {
+    await invoke("download_model", { model });
+  } catch (e) {
+    modelDownloading = false;
+    modelDlText = "";
+    setStat("modelStatus", "✗ failed", "error");
+    const b = $("downloadModel");
+    if (b) {
+      b.disabled = false;
+      b.textContent = "Download";
+    }
+    flash(String(e));
+  }
+}
+
+async function startCoremlDownload() {
+  if (coremlDownloading) return;
+  const model = config.offline.model;
+  coremlDownloading = true;
+  const btn = $("downloadCoreml");
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = "…";
+  }
+  setStat("coremlStatus", "0%", "downloading");
+  try {
+    await invoke("download_coreml_bundle", { model });
+  } catch (e) {
+    coremlDownloading = false;
+    setStat("coremlStatus", "✗ failed", "error");
+    const b = $("downloadCoreml");
+    if (b) {
+      b.disabled = false;
+      b.textContent = "Download";
+    }
+    flash(String(e));
+  }
+}
+
+listen("spoke:download-progress", (e) => {
+  if (!modelDownloading) return;
+  const { model, percent } = e.payload;
+  if (model !== config.offline.model) return;
+  modelDlText = `${percent}%`;
+  setStat("modelStatus", modelDlText, "downloading");
+});
+
+listen("spoke:download-complete", (e) => {
+  if (!modelDownloading) return;
+  modelDownloading = false;
+  modelDlText = "";
+  const { model } = e.payload;
+  if (model === config.offline.model) {
+    setStat("modelStatus", "✓ installed", "installed");
+    $("downloadModel") && $("downloadModel").classList.add("hide");
+  }
+  const b = $("downloadModel");
+  if (b) {
+    b.disabled = false;
+    b.textContent = "Download";
+  }
+});
+
+listen("spoke:coreml-progress", (e) => {
+  if (!coremlDownloading) return;
+  const { model, percent, phase } = e.payload;
+  if (model !== config.offline.model) return;
+  setStat("coremlStatus", phase === "extract" ? "unzip…" : `${percent}%`, "downloading");
+});
+
+listen("spoke:coreml-complete", (e) => {
+  if (!coremlDownloading) return;
+  coremlDownloading = false;
+  const { model } = e.payload;
+  if (model === config.offline.model) updateCoremlStatus(true);
+  const b = $("downloadCoreml");
+  if (b) {
+    b.disabled = false;
+    b.textContent = "Download";
+  }
 });
 
 // ---- Dragging the bubble ------------------------------------------------
 
 let dragOrigin = null;
 let didDrag = false;
-let micDevicesPopulated = false;
 
 // Use one event model (Pointer Events) for both drag and toggle. Mixing mouse
 // events for drag with pointer events for the toggle desyncs on WebKitGTK
@@ -711,15 +1313,8 @@ bubble.addEventListener("pointerup", (e) => {
     didDrag = false;
     return;
   }
-  if (panel.classList.contains("hidden")) {
-    openPanel();
-    if (!micDevicesPopulated) {
-      micDevicesPopulated = true;
-      populateMicDevices();
-    }
-  } else {
-    closePanel();
-  }
+  if (menuState === "closed") openRing();
+  else closeMenu();
 });
 
 // Safety net: if startDragging() swallows the pointerup (WM grabs the gesture),
@@ -738,239 +1333,17 @@ bubble.addEventListener("pointerleave", () => {
   if (!didDrag) pressTarget = 0;
 });
 
-// ---- Form wiring + boot -------------------------------------------------
-
-for (const el of Object.values(fields)) {
-  if (el.id !== "model" && el.id !== "accel") {
-    el.addEventListener("change", pushConfig);
-  }
-}
-
-fields.model.addEventListener("change", async () => {
-  await pushConfig();
-  if (!modelDownloading) checkCurrentModel();
-});
-
-fields.accel.addEventListener("change", async () => {
-  applyCoremlRowVisibility();
-  updateAccelBadge();
-  await pushConfig();
-  if (!modelDownloading) checkCurrentModel();
-});
-
-// True when the given backend id was compiled into this build.
-function hasBackend(id) {
-  return !!(buildInfo && buildInfo.backends && buildInfo.backends.some((b) => b.id === id));
-}
-
-// Badge label for the currently selected accel value. "auto" resolves to the
-// build's best backend; unknown/stale ids fall back to CPU.
-function getEffectiveAccel(accel, info) {
-  if (!info) return "—";
-  if (!info.whisper) return "CPU";
-  if (accel === "auto" || !accel) return info.acceleration || "CPU";
-  const backend = (info.backends || []).find((b) => b.id === accel);
-  return backend ? backend.badge : "CPU";
-}
-
-function updateAccelBadge() {
-  const label = getEffectiveAccel(fields.accel.value, buildInfo);
-  accelBadge.textContent = label;
-  accelBadge.dataset.accel = label;
-}
-
-async function loadBuildInfo() {
-  try {
-    buildInfo = await invoke("get_build_info");
-    if (!buildInfo.whisper) {
-      accelBadge.textContent = "CPU (no whisper)";
-      accelBadge.dataset.accel = "CPU";
-      return;
-    }
-
-    // Backends come from the build (best first, CPU always last). Show the
-    // selector only when there is an actual choice beyond CPU.
-    const backends = buildInfo.backends || [];
-    if (backends.length > 1) {
-      const sel = fields.accel;
-      sel.innerHTML = "";
-      const auto = document.createElement("option");
-      auto.value = "auto";
-      auto.textContent = `Auto (${buildInfo.acceleration})`;
-      sel.appendChild(auto);
-      for (const b of backends) {
-        const opt = document.createElement("option");
-        opt.value = b.id;
-        opt.textContent = b.label;
-        sel.appendChild(opt);
-      }
-      // Restore the saved choice; values from another build fall back to auto.
-      const saved = config && config.offline ? config.offline.accel : "";
-      sel.value = saved === "auto" || backends.some((b) => b.id === saved) ? saved : "auto";
-      $("gpuRow").classList.remove("hide");
-    }
-
-    applyCoremlRowVisibility();
-    updateAccelBadge();
-  } catch (e) {
-    accelBadge.textContent = "unknown";
-  }
-}
-
-function applyCoremlRowVisibility() {
-  const show = hasBackend("coreml") &&
-    (fields.accel.value === "coreml" || fields.accel.value === "auto");
-  $("coremlRow").classList.toggle("hide", !show);
-}
-
-// ---- Model download --------------------------------------------------
-
-async function checkCurrentModel() {
-  const model = fields.model.value;
-  const statusEl = $("modelStatus");
-  const dlBtn = $("downloadModel");
-  statusEl.textContent = "…";
-  statusEl.className = "model-status";
-  dlBtn.classList.add("hide");
-  try {
-    const info = await invoke("check_model", { model });
-    if (info.exists) {
-      statusEl.textContent = "✓";
-      statusEl.className = "model-status installed";
-      dlBtn.classList.add("hide");
-    } else {
-      statusEl.textContent = "—";
-      statusEl.className = "model-status";
-      dlBtn.classList.remove("hide");
-    }
-    // Update CoreML bundle status if that row is visible.
-    if (hasBackend("coreml") && !$("coremlRow").classList.contains("hide")) {
-      updateCoremlStatus(info.coreml_exists);
-    }
-  } catch (_) {
-    statusEl.textContent = "—";
-    statusEl.className = "model-status";
-    dlBtn.classList.add("hide");
-  }
-}
-
-function updateCoremlStatus(exists) {
-  const statusEl = $("coremlStatus");
-  const dlBtn = $("downloadCoreml");
-  if (exists) {
-    statusEl.textContent = "✓";
-    statusEl.className = "model-status installed";
-    dlBtn.classList.add("hide");
-  } else {
-    statusEl.textContent = "—";
-    statusEl.className = "model-status";
-    dlBtn.classList.remove("hide");
-  }
-}
-
-$("downloadCoreml").addEventListener("click", async () => {
-  if (coremlDownloading) return;
-  const model = fields.model.value;
-  const statusEl = $("coremlStatus");
-  const dlBtn = $("downloadCoreml");
-  coremlDownloading = true;
-  dlBtn.disabled = true;
-  dlBtn.textContent = "…";
-  dlBtn.classList.remove("hide");
-  statusEl.textContent = "0%";
-  statusEl.className = "model-status downloading";
-  fields.model.disabled = true;
-  try {
-    await invoke("download_coreml_bundle", { model });
-  } catch (e) {
-    statusEl.textContent = "✗";
-    statusEl.className = "model-status error";
-    dlBtn.disabled = false;
-    dlBtn.textContent = "Download";
-    coremlDownloading = false;
-    fields.model.disabled = false;
-    flash(String(e));
-  }
-});
-
-listen("spoke:coreml-progress", (e) => {
-  if (!coremlDownloading) return;
-  const { model, percent, phase } = e.payload;
-  if (model !== fields.model.value) return;
-  const statusEl = $("coremlStatus");
-  statusEl.className = "model-status downloading";
-  statusEl.textContent = phase === "extract" ? "unzip…" : `${percent}%`;
-});
-
-listen("spoke:coreml-complete", (e) => {
-  if (!coremlDownloading) return;
-  const { model } = e.payload;
-  if (model === fields.model.value) {
-    updateCoremlStatus(true);
-  }
-  $("downloadCoreml").disabled = false;
-  $("downloadCoreml").textContent = "Download";
-  fields.model.disabled = false;
-  coremlDownloading = false;
-});
-
-$("downloadModel").addEventListener("click", async () => {
-  if (modelDownloading) return;
-  const model = fields.model.value;
-  const statusEl = $("modelStatus");
-  const dlBtn = $("downloadModel");
-  modelDownloading = true;
-  dlBtn.disabled = true;
-  dlBtn.textContent = "…";
-  dlBtn.classList.remove("hide");
-  statusEl.textContent = "0%";
-  statusEl.className = "model-status downloading";
-  fields.model.disabled = true;
-  try {
-    await invoke("download_model", { model });
-  } catch (e) {
-    statusEl.textContent = "✗";
-    statusEl.className = "model-status error";
-    dlBtn.disabled = false;
-    dlBtn.textContent = "Download";
-    modelDownloading = false;
-    fields.model.disabled = false;
-    flash(String(e));
-  }
-});
-
-listen("spoke:download-progress", (e) => {
-  if (!modelDownloading) return;
-  const { model, percent } = e.payload;
-  if (model === fields.model.value) {
-    $("modelStatus").textContent = `${percent}%`;
-    $("modelStatus").className = "model-status downloading";
-  }
-});
-
-listen("spoke:download-complete", (e) => {
-  if (!modelDownloading) return;
-  const { model } = e.payload;
-  if (model === fields.model.value) {
-    $("modelStatus").textContent = "✓";
-    $("modelStatus").className = "model-status installed";
-    $("downloadModel").classList.add("hide");
-  }
-  $("downloadModel").disabled = false;
-  $("downloadModel").textContent = "Download";
-  fields.model.disabled = false;
-  modelDownloading = false;
-});
+// ---- Boot -----------------------------------------------------------------
 
 async function init() {
   try {
     config = await invoke("get_config");
-    formFromConfig(config);
   } catch (e) {
     flash("Failed to load config: " + e);
   }
-  loadBuildInfo();
-  checkCurrentModel();
+  buildOrbit();
+  await loadBuildInfo();
+  updateOrbitValues();
   checkPermissions();
   // Permissions can change behind our back (System Settings, TCC resets on
   // rebuild); poll cheaply so warnings appear and clear without a restart.

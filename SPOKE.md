@@ -85,7 +85,9 @@ Model options exposed in settings:
 | tiny | 75 MB | Ultra-low-end hardware |
 | base | 145 MB | Fast, decent accuracy |
 | small | 465 MB | Balanced |
+| medium | 1.5 GB | Higher accuracy, slower |
 | large-v3-turbo | 809 MB | Default — best accuracy/speed ratio |
+| large-v3 | 2.9 GB | Best accuracy, slowest |
 
 ### Online Speech-to-Text
 **Google Cloud Speech-to-Text v2 API** (Chirp 3 model) via `reqwest`. Audio is encoded as FLAC, POSTed as a single batch request after recording ends, and the transcript is returned in full. No streaming required.
@@ -184,7 +186,7 @@ mode = "offline"          # "offline" | "online"
 hotkey = "ctrl+alt+space" # default is "cmd+shift+s" on macOS
 trigger = "push_to_talk"  # "push_to_talk" | "toggle"
 language = "auto"         # "auto" | "da" | "en" | ...
-copy_to_clipboard = false # true: copy transcript instead of typing it
+output_dest = "type"      # "type" | "copy" | "both"
 
 [offline]
 model = "large-v3-turbo"
