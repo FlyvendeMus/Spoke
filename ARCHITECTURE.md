@@ -147,9 +147,39 @@ back to *Auto*.
 
 ### Platform quirks handled in code
 
-- **Linux/WebKitGTK**: `WEBKIT_DISABLE_COMPOSITING_MODE=1` is set to avoid
-  blank transparent windows; on Wayland a 1 px "repaint nudge" resize forces
-  the compositor to present panel updates.
+- **Linux/WebKitGTK**: `GDK_BACKEND` defaults to `x11` (XWayland on Wayland
+  sessions) because native Wayland can't report/set global window positions —
+  that breaks the bubble's edge-aware menu flipping. If `GDK_BACKEND` is
+  forced to `wayland`, a 1 px "repaint nudge" resize forces the compositor to
+  present panel updates (no-op on X11).
+- **Linux transparent-window repaints don't erase** (all WebKitGTK modes on
+  at least NVIDIA): repaints blend OVER the stale buffer instead of replacing
+  it, so translucent pixels (drop shadows, fading elements) stack darker each
+  frame and moving elements leave trails; only a window resize swaps in a
+  clean buffer. Countermeasure (Linux-gated): menu transitions are disabled
+  in CSS (`html.linux` block — state changes are instant, hover feedback
+  avoids shadow changes), and every discrete menu change is followed by one
+  1px gravity-anchored "buffer swap" resize (`nudgeOnce`/`presentFrame` in
+  main.js); the close shrink is immediate. Card scrolling would repaint the
+  card's translucent shadow every tick, so on Linux the card uses a border
+  instead and a debounced buffer swap runs when scrolling settles. The
+  menu-open resize used to flash black (X fills exposed regions with the
+  window background before WebKit paints); fixed by `set_app_paintable` plus
+  a transparent X background set through `gdk_window_set_background_rgba`
+  (via ffi — the rust binding is gated). Don't run a per-frame resize loop
+  instead — it jiggles visibly and fights the WM's drag grab. Don't set
+  `WEBKIT_DISABLE_COMPOSITING_MODE` / `WEBKIT_DISABLE_DMABUF_RENDERER` — they
+  don't fix it and add their own artifacts. The window is also made resizable
+  at runtime on Linux: GTK snaps non-resizable windows back to the webview's
+  ~200×200 natural size, overriding the 80×80 bubble size.
+- **Linux window resize (`set_window_size_anchored`)**: menu open/close must
+  keep the bubble's screen position fixed. A resize+move pair gets the move
+  validated by the WM against the *old* size, so near screen/monitor edges
+  KWin clamps it and the bubble walks. Instead the command sets ICCCM
+  win-gravity to the bubble's corner (from the flip state) and sends a
+  resize only — the WM keeps that corner pinned. Never use gdk
+  `move_resize` here: it resizes the X window behind GTK's back and the
+  webview keeps painting only the old area.
 - **Linux/ALSA**: device enumeration is filtered (no `hw:`/`dmix:` pseudo
   devices) and runs on a timeout thread, since misconfigured backends can
   block indefinitely. Capture prefers `pulse`/`pipewire`/`default`.

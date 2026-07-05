@@ -76,7 +76,7 @@ function updateWarnings() {
     lastWarnSig = sig;
     // Refresh an open card so its warning bar appears/clears in place.
     if (menuState !== "closed" && menuState !== "ring") rerenderCard();
-    invoke("nudge_repaint");
+    presentFrame();
   }
 }
 
@@ -241,6 +241,9 @@ let lastFrame = 0;
 const LOGICAL_SIZE   = window.__TAURI__.window.LogicalSize;
 const LOGICAL_POS    = window.__TAURI__.window.LogicalPosition;
 
+const IS_LINUX = navigator.userAgent.includes("Linux");
+if (IS_LINUX) document.documentElement.classList.add("linux");
+
 const MENU_W = 340;
 const MENU_H = 480;
 const BUBBLE_W = 80;
@@ -273,18 +276,81 @@ async function monitorBounds() {
   return { x: 0, y: 0, w: window.screen.width, h: window.screen.height };
 }
 
+// Apply window size + position together (boot placement; menu open/close on
+// non-Linux). On Linux this goes through one Rust command so both requests
+// drain in the same event-loop iteration; menu open/close on Linux uses
+// set_window_size_anchored instead (see resizeAndReposition).
+async function applyBounds(x, y, w, h) {
+  if (IS_LINUX) {
+    await invoke("set_window_bounds", { x, y, w, h });
+  } else {
+    await appWindow.setSize(new LOGICAL_SIZE(w, h));
+    await appWindow.setPosition(new LOGICAL_POS(x, y));
+  }
+}
+
+// Linux: WebKitGTK blends every repaint OVER the transparent window's stale
+// buffer instead of replacing it — anything translucent that gets repainted
+// (moving elements, fading opacity, changing shadows) stacks and trails. A
+// fresh buffer arrives only on a window resize. So on Linux the menu's
+// transitions are disabled in CSS (state changes are instant; see the
+// html.linux block in style.css) and every discrete change is followed by
+// exactly one 1px gravity-anchored resize: the buffer is replaced with a
+// single clean render of the new state. The flutter lands on the window's
+// far, fully transparent edge; the bubble corner stays pinned by the WM.
+let nudgeParity = false;
+function nudgeOnce() {
+  if (!IS_LINUX || menuState === "closed") return;
+  nudgeParity = !nudgeParity;
+  const gravity = (flipY ? "n" : "s") + (flipX ? "w" : "e");
+  invoke("set_window_size_anchored", {
+    w: MENU_W + (nudgeParity ? 1 : 0),
+    h: MENU_H,
+    gravity,
+  }).catch(() => {});
+}
+
+// Present the current frame after a discrete menu change: X11 needs the
+// buffer-swap resize above; a forced-Wayland backend needs the Rust-side
+// repaint nudge (no-op elsewhere).
+function presentFrame() {
+  nudgeOnce();
+  invoke("nudge_repaint");
+}
+
+// Scrolling a card repaints its region every tick; any translucent pixels in
+// it accumulate (see nudgeOnce above). Swap the buffer once scrolling
+// settles. Capture-phase on #subcard because scroll doesn't bubble and the
+// scrolling .card-body is rebuilt on every render.
+if (IS_LINUX) {
+  let scrollNudgeTimer = null;
+  subcard.addEventListener(
+    "scroll",
+    () => {
+      clearTimeout(scrollNudgeTimer);
+      scrollNudgeTimer = setTimeout(nudgeOnce, 150);
+    },
+    true
+  );
+}
+
 /// Resize while keeping the bubble's screen position fixed. Recomputes the
 /// grow direction per axis from where the bubble sits on its monitor, mirrors
 /// the layout via flip-x/flip-y on #root, then sizes and places the window so
 /// the bubble centre lands on the exact same screen pixel as before.
 /// `initial` places the window at the screen's bottom-right instead — used
 /// once at boot, mirroring position_bubble() in Rust.
-async function resizeAndReposition(w, h, initial = false) {
+/// `keepFlip` skips the flip recompute — used when shrinking back to
+/// bubble-only size, where re-flipping mid-close would mirror the layout while
+/// the window is still menu-sized and make the bubble jump corners.
+async function resizeAndReposition(w, h, initial = false, keepFlip = false) {
   try {
     if (initial) {
-      await appWindow.setSize(new LOGICAL_SIZE(w, h));
-      await appWindow.setPosition(
-        new LOGICAL_POS(window.screen.width - MARGIN - w, window.screen.height - MARGIN - h)
+      await applyBounds(
+        window.screen.width - MARGIN - w,
+        window.screen.height - MARGIN - h,
+        w,
+        h
       );
       return;
     }
@@ -295,20 +361,29 @@ async function resizeAndReposition(w, h, initial = false) {
     const bx = pos.x + (flipX ? BUBBLE_HALF : size.width - BUBBLE_HALF);
     const by = pos.y + (flipY ? BUBBLE_HALF : size.height - BUBBLE_HALF);
 
-    // Flip an axis when the menu wouldn't fit between the bubble and the
-    // monitor edge it normally grows toward.
-    const mon = await monitorBounds();
-    flipX = bx + BUBBLE_HALF - MENU_W < mon.x;
-    flipY = by + BUBBLE_HALF - MENU_H < mon.y;
+    if (!keepFlip) {
+      // Flip an axis when the menu wouldn't fit between the bubble and the
+      // monitor edge it normally grows toward.
+      const mon = await monitorBounds();
+      flipX = bx + BUBBLE_HALF - MENU_W < mon.x;
+      flipY = by + BUBBLE_HALF - MENU_H < mon.y;
 
-    root.classList.toggle("flip-x", flipX);
-    root.classList.toggle("flip-y", flipY);
-    buildOrbit();
+      root.classList.toggle("flip-x", flipX);
+      root.classList.toggle("flip-y", flipY);
+      buildOrbit();
+    }
 
+    if (IS_LINUX) {
+      // Resize anchored to the bubble's corner via WM gravity — no move
+      // request, so the WM can't clamp the transient geometry and walk the
+      // bubble (see set_window_size_anchored in lib.rs).
+      const gravity = (flipY ? "n" : "s") + (flipX ? "w" : "e");
+      await invoke("set_window_size_anchored", { w, h, gravity });
+      return;
+    }
     const x = flipX ? bx - BUBBLE_HALF : bx + BUBBLE_HALF - w;
     const y = flipY ? by - BUBBLE_HALF : by + BUBBLE_HALF - h;
-    await appWindow.setSize(new LOGICAL_SIZE(w, h));
-    await appWindow.setPosition(new LOGICAL_POS(x, y));
+    await applyBounds(x, y, w, h);
   } catch (_) { /* best‑effort — some platforms may lack the API */ }
 }
 
@@ -445,12 +520,16 @@ async function openRing() {
   // Grow the window (and rebuild the orbit for the current flip direction)
   // before the pop-out plays, so the animation is never clipped.
   await resizeAndReposition(MENU_W, MENU_H);
+  // The window starts with focus:false and some Linux WMs don't focus an
+  // undecorated skip-taskbar window on click — without focus, Escape and the
+  // hotkey recorder never see key events. Best-effort everywhere else.
+  try { await appWindow.setFocus(); } catch (_) {}
   updateOrbitValues();
   orbit.classList.remove("closed", "dimmed");
   subcard.classList.add("hidden");
   for (const b of orbit.children) b.classList.remove("active");
   updateWarnings();
-  invoke("nudge_repaint");
+  presentFrame();
   // Re-check on open so badges reflect grants/downloads made since the last poll.
   checkPermissions();
   refreshModelWarning();
@@ -462,7 +541,7 @@ function openCat(id) {
   for (const b of orbit.children) b.classList.toggle("active", b.dataset.cat === id);
   renderCard(id);
   subcard.classList.remove("hidden");
-  invoke("nudge_repaint");
+  presentFrame();
 }
 
 function backToRing() {
@@ -470,7 +549,7 @@ function backToRing() {
   orbit.classList.remove("dimmed");
   for (const b of orbit.children) b.classList.remove("active");
   subcard.classList.add("hidden");
-  invoke("nudge_repaint");
+  presentFrame();
 }
 
 let closeTimer = null;
@@ -482,12 +561,18 @@ function closeMenu() {
   orbit.classList.remove("dimmed");
   subcard.classList.add("hidden");
   invoke("nudge_repaint");
+  clearTimeout(closeTimer);
+  if (IS_LINUX) {
+    // Transitions are disabled on Linux, so the collapse is instant — shrink
+    // right away; the resize also discards any residue in the stale buffer.
+    resizeAndReposition(BUBBLE_W, BUBBLE_H, false, true);
+    return;
+  }
   // Shrinking the window is what restores click-through around the bubble,
   // but doing it immediately clips the collapse animation (0.45s spring +
   // up to 150ms stagger). Wait for the fold to land, then shrink.
-  clearTimeout(closeTimer);
   closeTimer = setTimeout(() => {
-    if (menuState === "closed") resizeAndReposition(BUBBLE_W, BUBBLE_H);
+    if (menuState === "closed") resizeAndReposition(BUBBLE_W, BUBBLE_H, false, true);
   }, 650);
 }
 
@@ -533,6 +618,7 @@ function flash(msg, action) {
   toast.textContent = msg;
   toast.classList.remove("hide");
   clearTimeout(flashTimer);
+  presentFrame();
   if (action) {
     const btn = document.createElement("button");
     btn.type = "button";
@@ -540,12 +626,16 @@ function flash(msg, action) {
     btn.textContent = action.label;
     btn.addEventListener("click", () => {
       toast.classList.add("hide");
+      presentFrame();
       action.action();
     });
     toast.appendChild(btn);
     return;
   }
-  flashTimer = setTimeout(() => toast.classList.add("hide"), 2500);
+  flashTimer = setTimeout(() => {
+    toast.classList.add("hide");
+    presentFrame();
+  }, 2500);
 }
 
 // ---- Sub-menu cards ---------------------------------------------------------
@@ -606,7 +696,7 @@ function renderCard(id) {
   subcard.querySelector(".card-back").addEventListener("click", backToRing);
   const body = subcard.querySelector(".card-body");
   CARD_BUILDERS[id](body);
-  invoke("nudge_repaint");
+  presentFrame();
 }
 
 // Re-render the currently open card in place (after a config change that

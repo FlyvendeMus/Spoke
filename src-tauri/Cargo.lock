@@ -3661,6 +3661,7 @@ dependencies = [
  "dirs 5.0.1",
  "enigo",
  "futures-util",
+ "gtk",
  "hound",
  "objc2 0.6.4",
  "objc2-foundation",

@@ -616,6 +616,50 @@ body {
   border-color: var(--warn);
 }
 
+/* ---- Linux compositing workarounds ---- */
+/* WebKitGTK on a transparent window blends repaints over the stale buffer
+   instead of replacing it: any translucent pixel that is repainted (moving
+   elements, opacity fades, shadow changes) stacks and trails; a clean buffer
+   arrives only with a window resize. So on Linux menu state changes are
+   instant — no transitions over transparent areas — and JS follows each one
+   with a single 1px buffer-swap resize (nudgeOnce in main.js). Static
+   translucency (resting shadows) is safe: it's painted exactly once per
+   swap. Hover feedback is limited to opaque pixels (border color, inner
+   scale) — a shadow change would repaint translucent pixels over themselves
+   and darken. */
+html.linux .orbit-b,
+html.linux #orbit.closed .orbit-b,
+html.linux #subcard,
+html.linux #toast {
+  transition: none;
+}
+/* Keep the resting shadow through hover/active states. */
+html.linux .orbit-b:hover,
+html.linux #orbit.dimmed .orbit-b.active {
+  box-shadow:
+    0 6px 18px rgba(0, 0, 0, 0.55),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+/* Scaling whole bubbles would smear their edges across transparent pixels;
+   opacity is fine — the dim toggle is a discrete change followed by a swap. */
+html.linux #orbit.dimmed .orbit-b {
+  transform: none;
+}
+/* Animated glows repaint translucent pixels continuously. */
+html.linux .ob-warn,
+html.linux .warn-bar {
+  animation: none;
+}
+/* Scrolling the card body repaints the card region each tick, and a
+   translucent box-shadow blended over itself darkens with every repaint —
+   so the card carries a border instead of a shadow. JS swaps the buffer
+   once scrolling settles to clear any residue (see the scroll listener in
+   main.js). */
+html.linux #subcard {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  border-color: #34343e;
+}
+
 /* ---- Flipped anchoring ---- */
 /* Default layout anchors the bubble at the window's bottom-right and grows the
    menu up-left. When the bubble sits near the screen's left/top edge, JS sets

@@ -53,6 +53,12 @@ dirs = "5"
 # Offline STT — heavy native build (whisper.cpp + cmake). Opt in with `--features whisper`.
 whisper-rs = { version = "0.16", optional = true }
 
+# Direct GTK access for atomic window move+resize — already in the tree
+# transitively via tauri/tao, so this adds no new builds. Version must track
+# tao's gtk (0.18 for tauri 2).
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"
+
 # macOS permission queries (mic TCC status, Accessibility trust) — already in
 # the tree transitively via tauri, so this adds no new builds.
 [target.'cfg(target_os = "macos")'.dependencies]

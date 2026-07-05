@@ -427,17 +427,72 @@ fn is_recording(state: State<'_, Arc<SpokeState>>) -> bool {
 /// surface reconfigure + commit, which is the only reliable way to present the new
 /// frame. We flip the width by 1px (oscillating, so it never drifts and the
 /// compositor can't coalesce it away); the change is imperceptible.
+/// Move and resize the bubble window together (boot placement, non-Linux
+/// open/close). Issued back-to-back so both land in the same event-loop turn.
+#[tauri::command]
+fn set_window_bounds(app: AppHandle, x: f64, y: f64, w: f64, h: f64) {
+    if let Some(win) = app.get_webview_window("bubble") {
+        let _ = win.set_size(tauri::LogicalSize::new(w, h));
+        let _ = win.set_position(tauri::LogicalPosition::new(x, y));
+    }
+}
+
+/// Linux menu open/close: resize the window anchored to the bubble's corner.
+///
+/// Keeping the bubble fixed through a resize naively takes a resize plus a
+/// move, but any move request is validated by the WM against the workarea
+/// using whatever size it believes at that instant — closing the menu near a
+/// screen/monitor edge gets the position clamped (the still-menu-sized window
+/// wouldn't fit) and the bubble visibly walks. Setting the ICCCM win-gravity
+/// to the bubble's corner and sending a resize *only* removes the move
+/// entirely: the WM itself keeps that corner pinned. (Don't reach for gdk's
+/// move_resize instead — it resizes the X window behind GTK's back and the
+/// webview keeps painting only the old area.)
+#[tauri::command]
+fn set_window_size_anchored(app: AppHandle, w: f64, h: f64, gravity: String) {
+    #[cfg(target_os = "linux")]
+    if let Some(win) = app.get_webview_window("bubble") {
+        use gtk::prelude::*;
+        let win2 = win.clone();
+        let _ = win.run_on_main_thread(move || {
+            let Ok(gtk_win) = win2.gtk_window() else { return };
+            let g = match gravity.as_str() {
+                "nw" => gtk::gdk::Gravity::NorthWest,
+                "ne" => gtk::gdk::Gravity::NorthEast,
+                "sw" => gtk::gdk::Gravity::SouthWest,
+                _ => gtk::gdk::Gravity::SouthEast,
+            };
+            gtk_win.set_gravity(g);
+            gtk_win.resize(w as i32, h as i32);
+        });
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = (app, w, h, gravity);
+}
+
 #[tauri::command]
 fn nudge_repaint(app: AppHandle) {
     #[cfg(target_os = "linux")]
-    if let Some(win) = app.get_webview_window("bubble") {
-        if let Ok(size) = win.outer_size() {
-            let width = if size.width % 2 == 0 {
-                size.width + 1
-            } else {
-                size.width - 1
-            };
-            let _ = win.set_size(tauri::PhysicalSize::new(width, size.height));
+    {
+        // Only the Wayland backend needs the nudge (run() defaults GDK_BACKEND
+        // to x11, so this is only hit on an explicit override). On X11 the
+        // webview presents on its own and the oscillating resize just adds
+        // visible flicker.
+        let wayland = std::env::var("GDK_BACKEND")
+            .map(|v| v.contains("wayland"))
+            .unwrap_or(false);
+        if !wayland {
+            return;
+        }
+        if let Some(win) = app.get_webview_window("bubble") {
+            if let Ok(size) = win.outer_size() {
+                let width = if size.width % 2 == 0 {
+                    size.width + 1
+                } else {
+                    size.width - 1
+                };
+                let _ = win.set_size(tauri::PhysicalSize::new(width, size.height));
+            }
         }
     }
     #[cfg(not(target_os = "linux"))]
@@ -630,16 +685,25 @@ fn register_hotkey(app: &AppHandle, cfg: &Config) -> anyhow::Result<()> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // WEBKIT_DISABLE_COMPOSITING_MODE=1 is required on Linux to prevent WebKitGTK
-    // from using GPU compositing, which on many setups causes the window to render
-    // blank or invisible.  Trade-off: some visual rendering artifacts.
+    // Linux windowing: force the X11 GDK backend (XWayland on Wayland sessions)
+    // unless the user overrides it. Native Wayland can neither report nor set
+    // global window positions, which breaks the bubble's edge-aware menu
+    // flipping (outerPosition/setPosition silently no-op, so the menu always
+    // grows down-right and gets clipped), and WebKitGTK's Wayland path needs
+    // GPU compositing disabled to show transparent windows at all — software
+    // rendering that ghosts and mangles drop shadows. Under X11, stock
+    // WebKitGTK compositing (DMABUF renderer included) presents the transparent
+    // window cleanly. Do NOT set WEBKIT_DISABLE_COMPOSITING_MODE or
+    // WEBKIT_DISABLE_DMABUF_RENDERER here: both drop WebKit to a fallback path
+    // that never clears the window's alpha buffer between frames, so
+    // translucent pixels (drop shadows) accumulate darker every repaint and
+    // moving elements leave trails. If the webview ever comes up blank
+    // (older NVIDIA driver combos), export WEBKIT_DISABLE_DMABUF_RENDERER=1
+    // manually as a last resort and expect those artifacts.
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
         if std::env::var("GDK_BACKEND").is_err() {
-            if std::env::var("WAYLAND_DISPLAY").is_ok() {
-                std::env::set_var("GDK_BACKEND", "wayland,x11");
-            }
+            std::env::set_var("GDK_BACKEND", "x11");
         }
     }
 
@@ -668,6 +732,8 @@ pub fn run() {
             is_recording,
             list_audio_devices,
             nudge_repaint,
+            set_window_bounds,
+            set_window_size_anchored,
             get_build_info,
             check_permissions,
             open_permission_settings,
@@ -712,6 +778,39 @@ pub fn run() {
                 // transparent windows with decorations=false may default to
                 // ignoring cursor events, making clicks pass through silently.
                 let _ = win.set_ignore_cursor_events(false);
+
+                // GTK snaps a non-resizable window back to its child's natural
+                // size (the webview reports 200×200), silently overriding the
+                // 80×80 bubble-only size and stranding the bubble mid-window.
+                // Marking the window resizable makes programmatic resizes
+                // stick; with no decorations the user still can't drag-resize.
+                #[cfg(target_os = "linux")]
+                {
+                    let _ = win.set_resizable(true);
+                    // After a resize, the X server fills not-yet-painted
+                    // regions with the window's background before WebKit's
+                    // first frame lands; the default fill is black, which
+                    // flashes as a dark rectangle when the menu opens. Stop
+                    // GTK painting a default background and set the X-level
+                    // background to transparent black (valid for the ARGB
+                    // visual) so the exposed region is simply invisible.
+                    if let Ok(gtk_win) = win.gtk_window() {
+                        use gtk::glib::translate::ToGlibPtr;
+                        use gtk::prelude::*;
+                        gtk_win.set_app_paintable(true);
+                        if let Some(gdk_win) = gtk_win.window() {
+                            let rgba = gtk::gdk::RGBA::new(0.0, 0.0, 0.0, 0.0);
+                            // Deprecated in GTK 3.22 but still functional; the
+                            // rust binding gates it away, so call the C symbol.
+                            unsafe {
+                                gtk::gdk::ffi::gdk_window_set_background_rgba(
+                                    gdk_win.to_glib_none().0,
+                                    rgba.to_glib_none().0,
+                                );
+                            }
+                        }
+                    }
+                }
 
                 // Keep the bubble visible when the user switches Spaces on macOS.
                 #[cfg(target_os = "macos")]

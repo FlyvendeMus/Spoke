@@ -5,6 +5,9 @@ src-tauri/gen
 # Models (downloaded at runtime, large)
 src-tauri/models/*.bin
 
+# Build artifacts
+Spoke-*.AppImage
+
 # Local config / secrets
 *.local
 .env
