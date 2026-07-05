@@ -242,7 +242,7 @@ const LOGICAL_SIZE   = window.__TAURI__.window.LogicalSize;
 const LOGICAL_POS    = window.__TAURI__.window.LogicalPosition;
 
 const MENU_W = 340;
-const MENU_H = 430;
+const MENU_H = 480;
 const BUBBLE_W = 80;
 const BUBBLE_H = 80;
 const MARGIN = 24;
@@ -322,12 +322,15 @@ const BUBBLE_CX = 40; // main bubble centre, from the window's anchor corner
 
 const CATS = [
   // Engine first and biggest: what model + acceleration is in use.
-  { id: "engine",   label: "Engine",   r: 101, angle: 98,  size: 65 },
-  { id: "hotkey",   label: "Hotkey",   r: 94,  angle: 135, size: 52 },
-  { id: "output",   label: "Output",   r: 94,  angle: 172, size: 52 },
-  { id: "language", label: "Language", r: 158, angle: 105, size: 50 },
-  { id: "mic",      label: "Mic",      r: 158, angle: 140, size: 50 },
-  { id: "history",  label: "History",  r: 158, angle: 175, size: 50 },
+  // Radii tuned so neighbouring bubbles sit a few px apart (compact ring);
+  // the sub-card opens in the band above the outer ring (see #subcard CSS),
+  // so the outer ring must stay below ~200px from the anchor corner.
+  { id: "engine",   label: "Engine",   r: 94,  angle: 98,  size: 60 },
+  { id: "hotkey",   label: "Hotkey",   r: 86,  angle: 135, size: 50 },
+  { id: "output",   label: "Output",   r: 86,  angle: 172, size: 50 },
+  { id: "language", label: "Language", r: 144, angle: 108, size: 46 },
+  { id: "mic",      label: "Mic",      r: 144, angle: 140, size: 46 },
+  { id: "history",  label: "History",  r: 144, angle: 175, size: 46 },
 ];
 
 // 'closed' | 'ring' | one of the CATS ids (sub-menu open).
@@ -355,19 +358,24 @@ function buildOrbit() {
     // Staggered pop-out; reverse order on collapse so the ring folds inward.
     b.style.setProperty("--d", `${i * 45}ms`);
     b.style.setProperty("--dr", `${(CATS.length - 1 - i) * 30}ms`);
-    // Idle bobbing, desynchronised per bubble.
-    b.style.setProperty("--bobDur", `${3.4 + i * 0.35}s`);
-    b.style.setProperty("--bobDel", `${-i * 0.7}s`);
 
     const inner = document.createElement("span");
     inner.className = "ob-inner";
     inner.innerHTML = `
       <span class="ob-label">${cat.label}</span>
-      <span class="ob-value" id="obv-${cat.id}">—</span>
+      <span class="ob-value" id="obv-${cat.id}"><span class="ob-marq">—</span></span>
       ${cat.id === "engine" ? '<span class="ob-badge" id="obb-engine">—</span>' : ""}
-      ${WARN_CATS.includes(cat.id) ? `<span class="ob-warn hide" id="obw-${cat.id}">!</span>` : ""}
     `;
     b.appendChild(inner);
+    // Badge lives on the button, not inside .ob-inner — the inner clips its
+    // content to the circle and would eat the badge's corner overhang.
+    if (WARN_CATS.includes(cat.id)) {
+      const w = document.createElement("span");
+      w.className = "ob-warn hide";
+      w.id = `obw-${cat.id}`;
+      w.textContent = "!";
+      b.appendChild(w);
+    }
 
     b.addEventListener("pointerdown", (e) => e.stopPropagation());
     b.addEventListener("click", (e) => {
@@ -384,11 +392,31 @@ function buildOrbit() {
 const MODEL_SHORT = { "large-v3-turbo": "turbo", "large-v3": "large" };
 const modelShort = (m) => MODEL_SHORT[m] || m;
 
+// Set a bubble's value text. When the text is wider than the bubble allows,
+// mark it to scroll back and forth (CSS marquee) instead of overflowing the
+// circle — long mic names are the usual case.
+function setOrbitValue(id, text) {
+  const el = $(`obv-${id}`);
+  if (!el || !el.firstElementChild) return;
+  el.firstElementChild.textContent = text;
+  el.classList.remove("scroll");
+  // Measure the inner span directly: with centered text the container's
+  // scrollWidth only reports the right-side overhang (half the real overflow).
+  // offsetWidth is layout-based, so the closed ring's scale() doesn't skew it.
+  const overflow = el.firstElementChild.offsetWidth - el.clientWidth;
+  if (overflow > 1) {
+    el.style.setProperty("--marqueeShift", `${-overflow}px`);
+    // Slower for longer overhang, clamped so it never crawls or zips.
+    el.style.setProperty("--marqueeDur", `${Math.min(8, Math.max(2.5, overflow / 14))}s`);
+    el.classList.add("scroll");
+  }
+}
+
 // Refresh the live values shown inside the orbit bubbles.
 function updateOrbitValues() {
   if (!config) return;
   const online = config.general.mode === "online";
-  $("obv-engine").textContent = online ? "online" : modelShort(config.offline.model);
+  setOrbitValue("engine", online ? "online" : modelShort(config.offline.model));
   const badge = $("obb-engine");
   if (online) {
     badge.textContent = "API";
@@ -398,13 +426,17 @@ function updateOrbitValues() {
     badge.textContent = label;
     badge.dataset.accel = label;
   }
-  $("obv-hotkey").textContent = config.general.hotkey || "—";
-  $("obv-language").textContent =
-    config.general.language === "auto" ? "Auto" : config.general.language.toUpperCase();
-  $("obv-output").textContent =
-    { type: "Type", copy: "Copy", both: "Both" }[config.general.output_dest] || "Type";
-  $("obv-mic").textContent = config.recording.input_device || "Default";
-  $("obv-history").textContent = String(history.length);
+  setOrbitValue("hotkey", config.general.hotkey || "—");
+  setOrbitValue(
+    "language",
+    config.general.language === "auto" ? "Auto" : config.general.language.toUpperCase()
+  );
+  setOrbitValue(
+    "output",
+    { type: "Type", copy: "Copy", both: "Both" }[config.general.output_dest] || "Type"
+  );
+  setOrbitValue("mic", config.recording.input_device || "Default");
+  setOrbitValue("history", String(history.length));
 }
 
 async function openRing() {
@@ -658,6 +690,16 @@ function buildEngineCard(body) {
   body.appendChild(modelSec);
   $("downloadModel").addEventListener("click", startModelDownload);
 
+  // Mark installed model chips with a checkmark.
+  const modelIdx = { tiny: 0, base: 1, small: 2, medium: 3, "large-v3-turbo": 4, "large-v3": 5 };
+  invoke("check_models").then((installed) => {
+    const chips = modelSec.querySelectorAll(".chip");
+    for (const name of installed) {
+      const idx = modelIdx[name];
+      if (idx !== undefined && idx < chips.length) chips[idx].classList.add("installed");
+    }
+  }).catch(() => {});
+
   // -- Acceleration backend (only when the build offers a choice) --
   const backends = (buildInfo && buildInfo.backends) || [];
   if (buildInfo && buildInfo.whisper && backends.length > 1) {
@@ -687,11 +729,21 @@ function buildEngineCard(body) {
   // -- CoreML bundle (Apple Neural Engine) --
   if (coremlRelevant()) {
     const cmSec = section("Neural engine bundle");
+    const desc = document.createElement("p");
+    desc.className = "muted";
+    desc.style.cssText = "margin: 0 0 6px; line-height: 1.4; font-size: 10px;";
+    desc.textContent =
+      "Offloads the Whisper encoder to the Apple Neural Engine for faster transcription. " +
+      "When not downloaded the GPU (Metal) backend is used as fallback.";
+    cmSec.appendChild(desc);
+
     const row = document.createElement("div");
     row.className = "dl-row";
     row.title = "CoreML encoder (.mlmodelc) — enables Apple Neural Engine";
+    const bundleSize = coremlBundleSize(config.offline.model);
     row.innerHTML = `
       <span id="coremlStatus">…</span>
+      <span class="muted">${bundleSize}</span>
       <button id="downloadCoreml" type="button" class="mini-btn hide">Download</button>
     `;
     cmSec.appendChild(row);
@@ -706,6 +758,18 @@ function buildEngineCard(body) {
 // True when the given backend id was compiled into this build.
 function hasBackend(id) {
   return !!(buildInfo && buildInfo.backends && buildInfo.backends.some((b) => b.id === id));
+}
+
+function coremlBundleSize(model) {
+  const sizes = {
+    tiny: "14 MB",
+    base: "36 MB",
+    small: "156 MB",
+    medium: "542 MB",
+    "large-v3-turbo": "1.1 GB",
+    "large-v3": "1.1 GB",
+  };
+  return sizes[model] || "";
 }
 
 function coremlRelevant() {

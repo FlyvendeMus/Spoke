@@ -4,7 +4,7 @@
   --border: #26262e;
   --border-soft: #1c1c22;
   --text: #d4d4dc;
-  --muted: #6a6a74;
+  --muted: #9494a0; /* keep ≥4.5:1 on the card/bubble backgrounds */
   --accent: #26d4c4; /* processing teal from the mosaic palette */
   --accent-dim: rgba(38, 212, 196, 0.16);
   --rec: #ff6c4b; /* listening orange from the mosaic palette */
@@ -134,10 +134,12 @@ body {
   transform: scale(0.94);
 }
 
-/* While a sub-menu is open: the active category glows, the rest recede. */
+/* While a sub-menu is open: the active category glows, the rest recede a
+   little — but stay full-size and clickable so the user can hop straight to
+   another section without closing the card first. */
 #orbit.dimmed .orbit-b {
-  opacity: 0.35;
-  transform: scale(0.72);
+  opacity: 0.55;
+  transform: scale(0.92);
   transition-delay: 0s;
 }
 #orbit.dimmed .orbit-b.active {
@@ -150,33 +152,23 @@ body {
     inset 0 1px 0 rgba(255, 255, 255, 0.08);
 }
 
-/* Inner wrapper carries the idle bobbing so it never fights the pop/collapse
-   transform on the bubble itself. */
+/* Inner wrapper isolates the hover/press scale from the pop/collapse
+   transform on the bubble itself. Absolutely positioned so its size is always
+   exactly the bubble — as a normal grid/flex child, a long nowrap value would
+   inflate the auto track to the text's min-content width and drag the whole
+   inner (label included) past the circle. overflow:hidden + the 50% radius
+   hard-clip anything inside to the circle, whatever the layout does. */
 .ob-inner {
+  position: absolute;
+  inset: 0;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   gap: 1px;
-  width: 100%;
-  height: 100%;
   border-radius: 50%;
+  overflow: hidden;
   transition: transform 0.18s ease;
-  animation: bob var(--bobDur, 4s) ease-in-out var(--bobDel, 0s) infinite;
-}
-@keyframes bob {
-  0%,
-  100% {
-    translate: 0 0;
-  }
-  50% {
-    translate: 0 -4px;
-  }
-}
-@media (prefers-reduced-motion: reduce) {
-  .ob-inner {
-    animation: none;
-  }
 }
 
 .ob-label {
@@ -184,15 +176,53 @@ body {
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--muted);
+  max-width: 85%;
+  overflow: hidden;
+  white-space: nowrap;
 }
+/* Value line: clipped to the circle (78% keeps it inside the curved edge).
+   When JS detects overflow it adds .scroll and the inner span glides back and
+   forth (marquee) so long values — mic names — read fully without ever
+   poking outside the bubble. */
 .ob-value {
+  display: block;
   font-size: 10px;
   font-weight: 700;
   color: var(--text);
-  max-width: 92%;
+  max-width: 78%;
   overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
+  text-align: center;
+}
+.ob-marq {
+  display: inline-block;
+  white-space: nowrap;
+}
+/* While scrolling, pin the text to the left edge so the marquee starts at the
+   name's beginning — centered alignment would hang the overflow out both
+   sides of the clip box. */
+.ob-value.scroll {
+  text-align: left;
+  text-overflow: clip;
+}
+.ob-value.scroll .ob-marq {
+  animation: marquee var(--marqueeDur, 5s) ease-in-out 0.8s infinite alternate;
+}
+@keyframes marquee {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(var(--marqueeShift, 0px));
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ob-value.scroll .ob-marq {
+    animation: none;
+  }
+  .ob-value.scroll {
+    text-overflow: ellipsis;
+  }
 }
 .ob-badge {
   font-size: 7px;
@@ -215,12 +245,15 @@ body {
 }
 
 /* ---- Sub-menu card ---- */
+/* Sits in the band above the orbit (outer ring tops out ~200px from the
+   anchor corner, see CATS in main.js) so the category bubbles stay visible
+   and clickable while a card is open — tap another bubble to switch section. */
 #subcard {
   position: fixed;
   right: 12px;
-  bottom: 106px;
+  bottom: 208px;
   width: 316px;
-  max-height: 312px;
+  max-height: 260px;
   display: flex;
   flex-direction: column;
   background: linear-gradient(180deg, #0e0e14 0%, #0a0a0e 100%);
@@ -314,6 +347,12 @@ body {
   font-family: inherit;
   letter-spacing: 0.04em;
   cursor: pointer;
+  /* Long labels (mic device names) ellipsize inside the card instead of
+     pushing the chip past its right edge. */
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   transition:
     border-color 0.15s ease,
     color 0.15s ease,
@@ -340,6 +379,9 @@ body {
 .chip:disabled {
   opacity: 0.5;
   cursor: default;
+}
+.chip.installed::before {
+  content: "✓ ";
 }
 .chip .chip-note {
   font-size: 9px;
@@ -596,7 +638,7 @@ body {
 }
 #root.flip-y #subcard {
   bottom: auto;
-  top: 106px;
+  top: 208px;
   transform-origin: 90% -10%;
 }
 #root.flip-x.flip-y #subcard {

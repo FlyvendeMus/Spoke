@@ -52,8 +52,17 @@ download progress).
 Cross-cutting details worth knowing:
 
 - **Engine caching** — building the Whisper engine loads the whole model into
-  RAM, so `SpokeState` caches it keyed on the engine-relevant config fields
-  (`EngineKey`) and rebuilds only when those change.
+  RAM *and* creates the whisper.cpp state (Metal backend init + CoreML encoder
+  load; the first-ever ANE specialization of a model can take minutes), so
+  `SpokeState` caches the engine keyed on the engine-relevant config fields
+  (`EngineKey`) and rebuilds only when those change. The `WhisperState` lives
+  inside `WhisperStt` behind a `Mutex` and is reused across transcriptions —
+  never recreate it per run (that re-pays the Metal/CoreML init every
+  recording). `FullParams` sets `no_context(true)` so the reused KV cache
+  doesn't bleed the previous transcript into the next one. `prewarm_engine`
+  builds the engine in the background at startup and after config saves so the
+  first recording doesn't pay the init cost; whisper.cpp inference runs on a
+  `spawn_blocking` thread so it never stalls async executor workers.
 - **Session counter** — every recording bumps an atomic counter; a pipeline
   checks it before injecting, so re-triggering cancels stale in-flight
   transcriptions instead of typing old text late.
@@ -109,8 +118,9 @@ back to *Auto*.
   automatically if it sits next to the model file. Spoke toggles this by
   renaming the bundle to `.disabled` when the user selects Metal, and back
   when they select CoreML/Auto — a runtime switch with no rebuild.
-- Switching accel (or model, or mode) invalidates the cached engine; the next
-  transcription rebuilds it with the new settings.
+- Switching accel (or model, or mode) invalidates the cached engine;
+  `prewarm_engine` rebuilds it in the background right after the config save
+  (falling back to a lazy rebuild on the next transcription).
 
 ### Adding a new backend
 

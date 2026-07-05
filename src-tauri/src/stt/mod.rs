@@ -12,6 +12,7 @@ pub use google::GoogleStt;
 
 use crate::config::{Config, Mode};
 use anyhow::Result;
+use std::sync::Arc;
 
 /// A ready-to-use transcription backend.
 pub enum SttEngine {
@@ -44,16 +45,28 @@ impl SttEngine {
 
     /// Transcribe mono `f32` audio. `sample_rate` is the rate of `mono`;
     /// `language` is "auto" or a BCP-47-ish code from the config.
+    ///
+    /// Takes `Arc<Self>` and owned buffers because the Whisper arm runs the
+    /// blocking whisper.cpp inference on a dedicated blocking thread instead
+    /// of stalling an async executor worker.
     pub async fn transcribe(
-        &self,
-        mono: &[f32],
+        self: Arc<Self>,
+        mono: Vec<f32>,
         sample_rate: u32,
-        language: &str,
+        language: String,
     ) -> Result<String> {
-        match self {
-            SttEngine::Google(g) => g.transcribe(mono, sample_rate, language).await,
+        match &*self {
+            SttEngine::Google(g) => g.transcribe(&mono, sample_rate, &language).await,
             #[cfg(feature = "whisper")]
-            SttEngine::Whisper(w) => w.transcribe(mono, sample_rate, language),
+            SttEngine::Whisper(_) => {
+                let this = Arc::clone(&self);
+                tokio::task::spawn_blocking(move || match &*this {
+                    SttEngine::Whisper(w) => w.transcribe(&mono, sample_rate, &language),
+                    _ => unreachable!("variant checked before spawn_blocking"),
+                })
+                .await
+                .map_err(|e| anyhow::anyhow!("whisper transcription task panicked: {e}"))?
+            }
         }
     }
 }

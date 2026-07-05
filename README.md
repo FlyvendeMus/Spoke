@@ -1,29 +1,63 @@
-# Spoke
+```
+▓███▓▓▓▓████████████████████████████████████████████████████▓██████▓▓▓▓▓▓█
+██████▓▒▒▒▓▒▒░░    ░░    _____             __        ░       ▒▒▓▒▒▓▓▓▓████
+█████▓▓▒▓▓▓▒░     ░░░   / ___/____  ____  / /_____  ░░      ░▒▓▒▒▒▓▓▓█████
+███▓█▓▓▓▓▓▒░ ░░░  ░░    \__ \/ __ \/ __ \/ //_/ _ \ ░      ░▒▒▒▒▒▒▓▓██████
+██▓███▓▓▓▓▒░░░░░       ___/ / /_/ / /_/ / ,< /  __/       ░░▒▒░░▒▓▓███████
+██████▓▓▒▒░░░▒░       /____/ .___/\____/_/|_|\___/      ░   ░░░░▒▓▓▓▓▓████
+█████▓▒▒▒▒░▒▒▒░           /_/                          ░     ░░▒▓▓▓▒▒▓████
+▓▓▓▓▓█████▓▓▓███████████████████████████████████████████████████▓▓▓▓████▓▓
+                                          
+```
 
-**Talk instead of type.** Hold a hotkey, say what you want to write, release — and the words appear wherever your cursor is. Any app, any text field: browsers, editors, chat, terminals.
+ [![Download](https://img.shields.io/badge/Download-Latest_Release-4A90D9?style=for-the-badge)](https://github.com/FlyvendeMus/Spoke/releases/latest)
 
-Spoke is a small floating bubble that lives in the corner of your screen. It works the same way on **macOS**, **Windows**, and **Linux**.
+**Talk instead of type.** Hold a hotkey, speak, release — your words appear wherever your cursor is. Any app, any text field, on **macOS**, **Windows**, and **Linux**.
 
 ## How it works
 
 1. **Hold the hotkey** (default: `Cmd+Shift+S` on Mac, `Ctrl+Alt+Space` elsewhere) — the microphone opens.
 2. **Speak.**
-3. **Release** — a second later your words are typed into whatever has focus.
+3. **Release** — moments later your words are typed into whatever has focus.
 
-Prefer tap-to-start / tap-to-stop? Switch the trigger to *Toggle* in settings. Prefer the text on your clipboard instead of typed out? Turn on *Copy to clipboard*.
+Prefer tap-to-start / tap-to-stop? Switch to **Toggle** mode. Prefer the text on your clipboard? Turn on **Copy to clipboard**.
+
+## In action
+
+<table>
+  <tr>
+    <td align="center"><img src=".github/screenshots/demo-typing.png" width="320" alt="Dictating into a text editor"><br>Dictating into a text editor</td>
+    <td align="center"><img src=".github/screenshots/demo-settings.png" width="320" alt="Switching models in settings"><br>Switching models in settings</td>
+  </tr>
+</table>
+
+## The bubble
+
+The bubble is an organic and reactive indicator that lives in the corner of your screen. Its colour, shape, and animation change to reflect what Spoke is doing. Click to open the orbit-ring menu; drag to reposition.
+
+<table>
+  <tr>
+    <td align="center"><img src=".github/screenshots/bubble-idle.png" width="120" alt="Idle bubble"><br><b>Idle</b><br>Waiting for input</td>
+    <td align="center"><img src=".github/screenshots/bubble-recording.png" width="120" alt="Recording bubble"><br><b>Recording</b><br>Listeing to what you are saying</td>
+    <td align="center"><img src=".github/screenshots/bubble-processing.png" width="120" alt="Processing bubble"><br><b>Transcribing</b><br>Prosessing your speech</td>
+    <td align="center"><img src=".github/screenshots/bubble-warning.png" width="120" alt="Warning bubble"><br><b>Warning</b><br>Something is wrong with your configuration</td>
+  </tr>
+</table>
 
 ## Private by default
 
-Spoke transcribes speech **on your own computer** using [Whisper](https://github.com/ggerganov/whisper.cpp). No account, no subscription, no audio leaving your machine, works offline.
+Spoke transcribes speech **on your own computer** using [Whisper](https://github.com/ggerganov/whisper.cpp). No account, no subscription, no audio leaving your machine, works compleatly offline.
 
 The first time you open settings, pick a model and click **Get** — Spoke downloads it for you:
 
 | Model | Size | Good for |
-|---|---|---|
+|-------|------|----------|
 | tiny | 75 MB | Very old or low-power machines |
 | base | 145 MB | Fast, decent accuracy |
 | small | 465 MB | Balanced |
-| large-v3-turbo | 809 MB | Best accuracy — the default |
+| medium | 1.4 GB | Better accuracy, more RAM |
+| large-v3-turbo | 1.5 GB | Best accuracy — the default |
+| large-v3 | 2.9 GB | Maximum accuracy |
 
 If you'd rather use a cloud service, switch **Mode** to *Online* and paste a Google Cloud Speech-to-Text API key. Online mode is faster on weak hardware but sends audio to Google.
 
@@ -32,45 +66,37 @@ If you'd rather use a cloud service, switch **Mode** to *Online* and paste a Goo
 Spoke uses whatever your hardware is best at. Each build is made for one platform and ships only what that platform needs:
 
 | Platform | Acceleration |
-|---|---|
+|----------|-------------|
 | macOS (Apple Silicon) | Neural Engine (CoreML), GPU (Metal), or CPU |
 | Linux | NVIDIA GPU (CUDA), any GPU (Vulkan), or CPU |
 | Windows | NVIDIA GPU (CUDA), any GPU (Vulkan), or CPU |
 
-The settings panel shows which one is active (the small badge next to the version number). You can change it anytime — no reinstall, no restart.
+The settings panel shows which one is active (the badge next to the version number). Change it anytime — no reinstall, no restart.
 
 ## Get Spoke
 
-Spoke is currently built from source. It takes one command per platform once the toolchain is installed — the full walkthrough for **macOS**, **Debian/Ubuntu**, **Arch Linux**, and **Windows** is in **[BUILD.md](BUILD.md)**.
+Pre-built binaries are available on the [Releases page](https://github.com/USERNAME/Spoke/releases).
 
-The build produces a normal installer for your system (`.dmg`/`.app` on macOS, `.deb`/`.rpm`/`.AppImage` on Linux, `.msi`/`.exe` on Windows). Everything else — the speech models — Spoke downloads itself when you ask it to.
+To build from source, see [BUILD.md](BUILD.md). It takes one command per platform once the toolchain is installed — the build produces a normal installer (`.dmg`, `.deb`, `.rpm`, `.AppImage`, `.msi`, or `.exe`). Speech models are downloaded in-app.
 
 ## First run
 
-- **macOS**: grant **Microphone** and **Accessibility** permissions when prompted (System Settings → Privacy & Security). Accessibility is what lets Spoke type for you. If you rebuild Spoke yourself, macOS treats each rebuild as a new app — re-grant both permissions after replacing the app.
-- **Linux on Wayland**: global hotkeys depend on your compositor. If the hotkey doesn't respond, launch with `GDK_BACKEND=x11 spoke`.
+- **macOS**: grant **Microphone** and **Accessibility** permissions when prompted. If rebuilding from source, re-grant both after replacing the app — each build gets a new signature.
+- **Linux on Wayland**: if the hotkey doesn't respond, try `GDK_BACKEND=x11 spoke`.
 - **Everywhere**: click the bubble to open settings, download a model, and you're set.
 
-If a permission is missing on macOS, the bubble shows an amber **!** — click it and use the **Fix** button in the warning banner to jump straight to the right System Settings pane.
-
-## The bubble
-
-- **Dim** — idle, waiting.
-- **Warm glow, reacting to your voice** — recording.
-- **Teal shimmer** — transcribing.
-
-Drag it anywhere. Click it for settings: mode, hotkey, language, model, acceleration, microphone, transcript history, and optional recording-to-file.
+Missing a permission? The bubble pulses yellow and category bubbles carry a **!** badge — click through to see what's needed.
 
 ## Where things live
 
-| What | Where |
-|---|---|
-| Settings (`spoke.toml`) | `~/Library/Application Support/spoke/` (macOS) · `~/.config/spoke/` (Linux) · `%APPDATA%\spoke\` (Windows) |
-| Downloaded models | `<config dir>/spoke/models/` |
-| Saved recordings (optional) | `~/Documents/Spoke` (configurable) |
+| What | macOS | Linux | Windows |
+|------|-------|-------|---------|
+| Settings (`spoke.toml`) | `~/Library/Application Support/spoke/` | `~/.config/spoke/` | `%APPDATA%\spoke\` |
+| Downloaded models | `<config dir>/spoke/models/` | `<config dir>/spoke/models/` | `<config dir>/spoke/models/` |
+| Saved recordings (optional) | `~/Documents/Spoke` | `~/Documents/Spoke` | `~/Documents\Spoke` |
 
-## More documentation
+## Documentation
 
 - **[BUILD.md](BUILD.md)** — building and packaging for each platform
-- **[ARCHITECTURE.md](ARCHITECTURE.md)** — how Spoke works inside, globally and per platform
+- **[ARCHITECTURE.md](ARCHITECTURE.md)** — how Spoke works inside
 - **[SPOKE.md](SPOKE.md)** — the original product specification

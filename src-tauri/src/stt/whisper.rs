@@ -9,12 +9,20 @@ use crate::audio;
 use crate::config::Config;
 use anyhow::{anyhow, Result};
 use std::path::PathBuf;
-use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
+use std::sync::Mutex;
+use whisper_rs::{
+    FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperState,
+};
 
 const WHISPER_RATE: u32 = 16_000;
 
 pub struct WhisperStt {
-    ctx: WhisperContext,
+    /// Reused across transcriptions: whisper.cpp initializes the Metal backend
+    /// and the CoreML encoder (incl. the multi-minute first ANE specialization)
+    /// per *state*, not per context — recreating it every run would pay that
+    /// cost on every recording. The state internally keeps the ggml weights
+    /// (`Arc<WhisperInnerContext>`) alive.
+    state: Mutex<WhisperState>,
 }
 
 impl WhisperStt {
@@ -41,13 +49,28 @@ impl WhisperStt {
         }
 
         let mut params = WhisperContextParameters::default();
-        params.use_gpu(wants_gpu(cfg));
+        let use_gpu = wants_gpu(cfg);
+        params.use_gpu(use_gpu);
+        // Flash attention speeds up Metal/GPU decoding significantly; safe here
+        // since we don't use DTW token timestamps (incompatible with it).
+        params.flash_attn(use_gpu);
+        let build_start = std::time::Instant::now();
         let ctx = WhisperContext::new_with_params(
             path.to_str().ok_or_else(|| anyhow!("bad model path"))?,
             params,
         )
         .map_err(|e| anyhow!("failed to load whisper model: {e}"))?;
-        Ok(Self { ctx })
+        let state = ctx
+            .create_state()
+            .map_err(|e| anyhow!("whisper state: {e}"))?;
+        eprintln!(
+            "[spoke] whisper engine built (model load + backend init) in {:.1}s",
+            build_start.elapsed().as_secs_f32()
+        );
+        drop(ctx); // the state keeps the weights alive via its inner Arc
+        Ok(Self {
+            state: Mutex::new(state),
+        })
     }
 
     /// Synchronous (whisper.cpp is blocking); callers should run it off the
@@ -60,23 +83,28 @@ impl WhisperStt {
         let pad = WHISPER_RATE as usize / 2;
         audio.extend(std::iter::repeat(0.0f32).take(pad));
 
-        let mut state = self
-            .ctx
-            .create_state()
-            .map_err(|e| anyhow!("whisper state: {e}"))?;
-
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
         params.set_language(Some(if language.is_empty() { "auto" } else { language }));
         params.set_no_speech_thold(0.6);
         params.set_suppress_blank(true);
+        // The reused state's KV cache would otherwise feed the previous
+        // recording's text in as context, bleeding it into this transcript.
+        params.set_no_context(true);
         params.set_print_special(false);
         params.set_print_progress(false);
         params.set_print_realtime(false);
         params.set_print_timestamps(false);
 
+        let mut state = self.state.lock().unwrap();
+        let infer_start = std::time::Instant::now();
         state
             .full(params, &audio)
             .map_err(|e| anyhow!("whisper inference failed: {e}"))?;
+        eprintln!(
+            "[spoke] whisper inference: {:.2}s for {:.2}s of audio",
+            infer_start.elapsed().as_secs_f32(),
+            audio.len() as f32 / WHISPER_RATE as f32
+        );
 
         let segments = state.full_n_segments();
         let mut out = String::new();

@@ -22,8 +22,10 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
 /// Identifies the config fields that determine how an `SttEngine` is built.
 /// When these are unchanged we reuse the cached engine instead of rebuilding —
-/// rebuilding the offline engine reloads the whole Whisper model into RAM, which
-/// is the dominant memory cost per transcription.
+/// rebuilding the offline engine reloads the whole Whisper model into RAM and
+/// re-initializes the Metal/CoreML backends (the CoreML ANE specialization can
+/// take minutes on first use), so the engine — including its whisper state —
+/// must be built once and reused across transcriptions.
 #[derive(PartialEq, Eq)]
 struct EngineKey {
     mode: Mode,
@@ -84,6 +86,43 @@ impl SpokeState {
     }
 }
 
+/// Build the STT engine in the background so the first recording doesn't pay
+/// model load + Metal/CoreML init on the critical path (the first-ever ANE
+/// specialization of a CoreML model on a device can take minutes). No-op when
+/// the cached engine already matches the config. Only warms offline mode —
+/// the online engine is trivial to build lazily, and warming it would surface
+/// "missing API key" errors at launch for unconfigured setups.
+fn prewarm_engine(app: &AppHandle, state: &Arc<SpokeState>) {
+    let cfg = state.config_snapshot();
+    if cfg.general.mode != Mode::Offline {
+        return;
+    }
+    #[cfg(feature = "whisper")]
+    {
+        // Don't warm (and thus error) when the model isn't downloaded yet.
+        if !stt::whisper::model_exists(&cfg.offline.model) {
+            return;
+        }
+        let app = app.clone();
+        let state = Arc::clone(state);
+        tauri::async_runtime::spawn(async move {
+            emit_state(&app, "processing", None);
+            let build = {
+                let state = Arc::clone(&state);
+                tokio::task::spawn_blocking(move || state.engine(&cfg).map(|_| ())).await
+            };
+            match build {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => emit_state(&app, "error", Some(format!("engine init: {e}"))),
+                Err(e) => emit_state(&app, "error", Some(format!("engine init panicked: {e}"))),
+            }
+            emit_state(&app, "idle", None);
+        });
+    }
+    #[cfg(not(feature = "whisper"))]
+    let _ = app;
+}
+
 /// UI-facing recording state, sent on the `spoke:state` event.
 fn emit_state(app: &AppHandle, state: &str, message: Option<String>) {
     let _ = app.emit(
@@ -109,6 +148,9 @@ fn set_config(
     *state.config.lock().unwrap() = new_config.clone();
     // Re-register the hotkey in case it changed.
     register_hotkey(&app, &new_config).map_err(|e| e.to_string())?;
+    // Rebuild the engine in the background if engine-relevant config changed
+    // (no-op otherwise), so the next recording doesn't pay the init cost.
+    prewarm_engine(&app, &state);
     Ok(())
 }
 
@@ -190,6 +232,17 @@ fn check_model(model: String) -> Result<serde_json::Value, String> {
         info["coreml_url"] = stt::whisper::coreml_bundle_url(&model).into();
     }
     Ok(info)
+}
+
+#[cfg(feature = "whisper")]
+#[tauri::command]
+fn check_models() -> Result<Vec<String>, String> {
+    let known = ["tiny", "base", "small", "medium", "large-v3-turbo", "large-v3"];
+    Ok(known
+        .iter()
+        .filter(|m| stt::whisper::model_exists(m))
+        .map(|s| s.to_string())
+        .collect())
 }
 
 #[cfg(feature = "coreml")]
@@ -455,10 +508,12 @@ fn finish_recording(app: AppHandle, state: Arc<SpokeState>) {
                 emit_state(&app, "idle", None);
             }
         }
-        // Per-run scratch (resampled audio, whisper KV-cache state, base64
-        // buffers) is freed by now, but glibc keeps it in its arenas rather than
-        // returning it to the OS, so RSS ratchets up after each transcription.
-        // Force the freed pages back to the OS so memory stays flat.
+        // Per-run scratch (resampled audio, base64 buffers) is freed by now —
+        // the whisper state (KV cache, Metal/CoreML contexts) is deliberately
+        // retained inside the cached engine because re-initializing it per run
+        // costs seconds (Metal) to minutes (CoreML/ANE). glibc keeps freed
+        // scratch in its arenas rather than returning it to the OS, so force
+        // the freed pages back so RSS stays flat.
         release_heap();
     });
 }
@@ -517,10 +572,11 @@ async fn run_pipeline(app: &AppHandle, state: &Arc<SpokeState>, session: u64) ->
     drop(rec);
 
     let engine = state.engine(&cfg)?;
+    // `mono` is moved in and freed as soon as inference completes; the whisper
+    // arm runs on a blocking thread so this await doesn't stall the executor.
     let transcript = engine
-        .transcribe(&mono, sample_rate, &cfg.general.language)
+        .transcribe(mono, sample_rate, cfg.general.language.clone())
         .await?;
-    drop(mono);
 
     let transcript = transcript.trim().to_string();
     if transcript.is_empty() {
@@ -622,6 +678,8 @@ pub fn run() {
             #[cfg(feature = "whisper")]
             check_model,
             #[cfg(feature = "whisper")]
+            check_models,
+            #[cfg(feature = "whisper")]
             download_model,
             #[cfg(feature = "coreml")]
             download_coreml_bundle,
@@ -642,6 +700,9 @@ pub fn run() {
             if let Err(e) = register_hotkey(&handle, &cfg) {
                 eprintln!("[spoke] hotkey registration failed: {e}");
             }
+
+            // Warm the STT engine so the first recording is fast.
+            prewarm_engine(&handle, &app.state::<Arc<SpokeState>>());
 
             build_tray(app)?;
             position_bubble(&handle);
