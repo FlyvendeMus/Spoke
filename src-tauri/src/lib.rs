@@ -132,6 +132,50 @@ fn open_permission_settings(which: String) {
     permissions::open_settings(&which);
 }
 
+#[tauri::command]
+fn request_accessibility_permission() {
+    #[cfg(target_os = "macos")]
+    permissions::request_accessibility();
+    #[cfg(not(target_os = "macos"))]
+    {}
+}
+
+/// Show the native mic permission prompt (if undetermined) and resolve with the
+/// resulting status. A grant here applies to the running process immediately.
+#[tauri::command]
+async fn request_microphone_permission() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        let (tx, rx) = tokio::sync::oneshot::channel::<bool>();
+        let tx = std::sync::Mutex::new(Some(tx));
+        permissions::request_microphone(move |granted| {
+            if let Some(tx) = tx.lock().unwrap().take() {
+                let _ = tx.send(granted);
+            }
+        });
+        rx.await.unwrap_or(false)
+    }
+    #[cfg(not(target_os = "macos"))]
+    true
+}
+
+/// Clear this app's TCC entry for a permission ("microphone" | "accessibility")
+/// so it can be re-requested cleanly. Recovers from the stale-grant state where
+/// System Settings shows Spoke enabled but the OS denies the running binary
+/// (the entry was recorded for a previous build's code signature).
+#[tauri::command]
+fn reset_permission(app: AppHandle, which: String) {
+    permissions::reset(&which, &app.config().identifier);
+}
+
+/// Relaunch the process. Some permission changes only apply to a fresh process
+/// (e.g. macOS revokes-then-regrants via System Settings while running); the UI
+/// offers this as a one-click fallback when a grant doesn't register live.
+#[tauri::command]
+fn restart_app(app: tauri::AppHandle) {
+    app.restart();
+}
+
 #[cfg(feature = "whisper")]
 #[tauri::command]
 fn check_model(model: String) -> Result<serde_json::Value, String> {
@@ -350,6 +394,33 @@ fn nudge_repaint(app: AppHandle) {
 // ---- Recording lifecycle --------------------------------------------------
 
 fn begin_recording(app: &AppHandle, state: &Arc<SpokeState>) {
+    // Refuse to start capturing without mic permission. Without this guard the
+    // OS prompt fires mid-recording on first use: CoreAudio captures silence
+    // while the dialog is up and the dictation "fails" confusingly. Triggering
+    // the prompt here instead means the user grants once and the next attempt
+    // works — no restart needed.
+    #[cfg(target_os = "macos")]
+    match permissions::check().microphone {
+        permissions::PermissionState::Granted | permissions::PermissionState::Unknown => {}
+        permissions::PermissionState::Undetermined => {
+            permissions::request_microphone(|_| {});
+            emit_state(
+                app,
+                "error",
+                Some("Microphone permission needed — grant it in the dialog, then dictate again".into()),
+            );
+            return;
+        }
+        permissions::PermissionState::Denied => {
+            emit_state(
+                app,
+                "error",
+                Some("Microphone access denied — open the Microphone card to fix it".into()),
+            );
+            return;
+        }
+    }
+
     if state.recording.swap(true, Ordering::SeqCst) {
         return; // already recording
     }
@@ -544,6 +615,10 @@ pub fn run() {
             get_build_info,
             check_permissions,
             open_permission_settings,
+            request_accessibility_permission,
+            request_microphone_permission,
+            reset_permission,
+            restart_app,
             #[cfg(feature = "whisper")]
             check_model,
             #[cfg(feature = "whisper")]

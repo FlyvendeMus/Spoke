@@ -148,11 +148,26 @@ back to *Auto*.
   gives the transparent window proper behavior.
 - **macOS permissions**: the UI polls `check_permissions` (AVCaptureDevice
   TCC status + `AXIsProcessTrusted`) and shows an amber `!` on the bubble plus
-  a banner in the panel when Microphone or Accessibility is missing, with a
-  *Fix* button that opens the right System Settings pane. Other platforms
-  report `unknown` and never warn — extend `permissions.rs` if one grows a
-  queryable API. The Accessibility warning is suppressed in clipboard mode,
-  which doesn't inject keystrokes.
+  a banner in the panel when Microphone or Accessibility is missing. Other
+  platforms report `unknown` and never warn — extend `permissions.rs` if one
+  grows a queryable API. The Accessibility warning is suppressed in clipboard
+  mode, which doesn't inject keystrokes. Granting flows:
+  - *Microphone*: `request_microphone_permission` fires the native
+    `requestAccessForMediaType:` prompt — a grant applies to the running
+    process immediately. Recording refuses to start while the permission is
+    undetermined/denied (otherwise the OS prompt appears mid-dictation and the
+    capture is silence). If previously denied, the UI offers "Ask me again"
+    (`reset_permission` → `tccutil reset` → re-prompt) or System Settings.
+  - *Accessibility*: `request_accessibility_permission`
+    (`AXIsProcessTrustedWithOptions` with prompt) registers the current binary
+    with TCC before opening System Settings. Because ad-hoc-signed builds
+    change their code hash every rebuild, an old grant can show as enabled in
+    Settings while the OS denies the new binary — the "Already on? Fix it"
+    button resets the stale entry and re-registers. After any grant action the
+    UI polls at 1.5 s (baseline 15 s) so the warning clears within seconds,
+    and offers a one-click `restart_app` for the cases where only a fresh
+    process picks the grant up. Signing release builds with a stable identity
+    avoids the stale-grant problem entirely.
 
 ### Why the binary is self-contained
 

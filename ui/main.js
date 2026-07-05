@@ -20,22 +20,28 @@ let buildInfo = null;
 let history = [];
 const MAX_HISTORY = 50;
 
-// ---- Permission warnings --------------------------------------------------
+// ---- Warnings (permissions + missing model) -------------------------------
+// No floating bar. Warnings surface two ways: the main bubble pulses amber
+// (the mosaic "warning" animation) whenever anything is wrong, and the related
+// category bubble gets an amber "!" badge. Opening that category's card shows a
+// yellow bar with a Grant/Download action.
 
-const permWarning = $("permWarning");
-const permBadge = $("permBadge");
 let permissions = null;
-let lastPermSig = null;
+let modelMissing = false;      // offline model for current selection not on disk
+let lastWarnSig = "";
 
 const PERM_INFO = {
   microphone: { label: "Microphone access denied", hint: "Spoke can't hear you" },
   accessibility: { label: "Accessibility not granted", hint: "Spoke can't type for you" },
 };
 
+// Category bubbles that can carry a warning badge → the condition that lights it.
+const WARN_CATS = ["engine", "output", "mic"];
+
 function missingPermissions() {
   if (!permissions) return [];
   const missing = [];
-  if (permissions.microphone === "denied") missing.push("microphone");
+  if (permissions.microphone !== "granted" && permissions.microphone !== "unknown") missing.push("microphone");
   // Accessibility only matters for keystroke injection; pure clipboard mode
   // doesn't use it, so don't nag about it there.
   const injecting = !!(config && config.general && config.general.output_dest !== "copy");
@@ -43,45 +49,122 @@ function missingPermissions() {
   return missing;
 }
 
-function renderPermissionWarnings() {
-  const missing = missingPermissions();
-  const sig = missing.join(",") + "|" + menuState;
-  if (sig === lastPermSig) return;
-  lastPermSig = sig;
+// True when offline mode is selected but its model isn't downloaded.
+function modelWarn() {
+  return !!(config && config.general.mode === "offline" && modelMissing);
+}
 
-  permBadge.classList.toggle("hide", missing.length === 0);
-  // The warning card only has room while the menu is open.
-  permWarning.classList.toggle("hide", missing.length === 0 || menuState === "closed");
-  permWarning.innerHTML = "";
-  for (const key of missing) {
-    const row = document.createElement("div");
-    row.className = "perm-row";
-    const text = document.createElement("span");
-    text.textContent = `⚠ ${PERM_INFO[key].label} — ${PERM_INFO[key].hint}`;
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.className = "mini-btn";
-    btn.textContent = "Fix";
-    btn.title = "Open the system settings pane for this permission";
-    btn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      invoke("open_permission_settings", { which: key });
-    });
-    row.appendChild(text);
-    row.appendChild(btn);
-    permWarning.appendChild(row);
+// Recompute the aggregate warning state: drive the bubble's amber pulse, light
+// the per-category badges, and refresh an open card so its warning bar tracks.
+function updateWarnings() {
+  const missing = missingPermissions();
+  const mWarn = modelWarn();
+  warnActive = missing.length > 0 || mWarn;
+
+  const lit = {
+    mic: missing.includes("microphone"),
+    output: missing.includes("accessibility"),
+    engine: mWarn,
+  };
+  for (const id of WARN_CATS) {
+    const el = $(`obw-${id}`);
+    if (el) el.classList.toggle("hide", !lit[id]);
   }
-  // Visibility changed — force a frame on Wayland (see nudge_repaint).
-  invoke("nudge_repaint");
+
+  const sig = missing.join(",") + "|" + mWarn;
+  if (sig !== lastWarnSig) {
+    lastWarnSig = sig;
+    // Refresh an open card so its warning bar appears/clears in place.
+    if (menuState !== "closed" && menuState !== "ring") rerenderCard();
+    invoke("nudge_repaint");
+  }
+}
+
+let fastPollTimer = null;
+// After the user takes a grant action, watch for the change at a 1.5s cadence
+// (the baseline poll is 15s) so the warning clears the moment the OS registers
+// the grant instead of looking ignored. Stops itself once nothing is missing.
+function watchForGrant() {
+  clearInterval(fastPollTimer);
+  const deadline = Date.now() + 90000;
+  fastPollTimer = setInterval(() => {
+    if (Date.now() > deadline) {
+      clearInterval(fastPollTimer);
+      return;
+    }
+    checkPermissions();
+  }, 1500);
 }
 
 async function checkPermissions() {
+  const prev = permissions;
   try {
     permissions = await invoke("check_permissions");
   } catch (_) {
     permissions = null;
   }
-  renderPermissionWarnings();
+  // Confirm grants the moment they register, so the user knows their trip
+  // through Settings (or the native prompt) actually took effect.
+  if (prev && permissions) {
+    if (prev.microphone !== "granted" && permissions.microphone === "granted") {
+      if (prev.microphone === "denied") {
+        // A Settings-toggle grant on a running app can need a fresh process
+        // before CoreAudio delivers audio; offer the restart up front.
+        flash("Microphone granted. If dictation still fails, restart Spoke.", {
+          label: "Restart",
+          action: () => invoke("restart_app"),
+        });
+      } else {
+        flash("Microphone access granted");
+      }
+    }
+    if (prev.accessibility !== "granted" && permissions.accessibility === "granted") {
+      flash("Accessibility granted — Spoke can type now");
+    }
+  }
+  updateWarnings();
+  if (missingPermissions().length === 0) clearInterval(fastPollTimer);
+}
+
+// Poll disk for the currently-selected offline model so the warning is right
+// even when the engine card is closed.
+async function refreshModelWarning() {
+  if (!config || config.general.mode !== "offline") {
+    modelMissing = false;
+    updateWarnings();
+    return;
+  }
+  const model = config.offline.model;
+  try {
+    const info = await invoke("check_model", { model });
+    if (config.general.mode === "offline" && model === config.offline.model) {
+      modelMissing = !info.exists;
+    }
+  } catch (_) { /* leave prior value */ }
+  updateWarnings();
+}
+
+// A yellow warning bar for the top of a card: explanation + action buttons.
+// `buttons`: [{ label, onClick }] — first entry is the primary action.
+function warnBar(text, buttons) {
+  const bar = document.createElement("div");
+  bar.className = "warn-bar";
+  const span = document.createElement("span");
+  span.className = "warn-text";
+  span.textContent = text;
+  bar.appendChild(span);
+  for (const b of buttons) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "mini-btn";
+    btn.textContent = b.label;
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      b.onClick();
+    });
+    bar.appendChild(btn);
+  }
+  return bar;
 }
 
 // ── Mosaic shape canvas ────────────────────────────────────────────────────
@@ -127,7 +210,9 @@ let mosaicPrev = performance.now();
 // state changes morph instead of cutting.
 const shapeP = Object.assign({}, MODES.idle.shape);
 const modeW  = { idle: 1, listening: 0, processing: 0 };
-let errB = 0;                 // error blend 0..1 (overlays any mode)
+let errB = 0;                 // transient error blend 0..1 (overlays any mode)
+let warnB = 0;                // persistent warning blend 0..1 (perms / model)
+let warnActive = false;       // set by updateWarnings() from perm/model state
 let press = 0;                // squish spring on press
 let pressTarget = 0;
 let pressT = -10;             // time of last press (drives the ripple)
@@ -280,6 +365,7 @@ function buildOrbit() {
       <span class="ob-label">${cat.label}</span>
       <span class="ob-value" id="obv-${cat.id}">—</span>
       ${cat.id === "engine" ? '<span class="ob-badge" id="obb-engine">—</span>' : ""}
+      ${WARN_CATS.includes(cat.id) ? `<span class="ob-warn hide" id="obw-${cat.id}">!</span>` : ""}
     `;
     b.appendChild(inner);
 
@@ -291,6 +377,8 @@ function buildOrbit() {
     });
     orbit.appendChild(b);
   });
+  // Rebuilding wiped the badge nodes — restore their lit state.
+  if (config) updateWarnings();
 }
 
 const MODEL_SHORT = { "large-v3-turbo": "turbo", "large-v3": "large" };
@@ -329,11 +417,11 @@ async function openRing() {
   orbit.classList.remove("closed", "dimmed");
   subcard.classList.add("hidden");
   for (const b of orbit.children) b.classList.remove("active");
-  lastPermSig = null;
-  renderPermissionWarnings();
+  updateWarnings();
   invoke("nudge_repaint");
-  // Re-check on open so the banner reflects grants made since the last poll.
+  // Re-check on open so badges reflect grants/downloads made since the last poll.
   checkPermissions();
+  refreshModelWarning();
 }
 
 function openCat(id) {
@@ -361,8 +449,6 @@ function closeMenu() {
   orbit.classList.add("closed");
   orbit.classList.remove("dimmed");
   subcard.classList.add("hidden");
-  lastPermSig = null;
-  renderPermissionWarnings();
   invoke("nudge_repaint");
   // Shrinking the window is what restores click-through around the bubble,
   // but doing it immediately clips the collapse animation (0.45s spring +
@@ -385,14 +471,12 @@ document.addEventListener("pointerdown", (e) => {
   if (
     !subcard.contains(e.target) &&
     !orbit.contains(e.target) &&
-    !bubble.contains(e.target) &&
-    !permWarning.contains(e.target)
+    !bubble.contains(e.target)
   ) {
     closeMenu();
   }
 });
 subcard.addEventListener("pointerdown", (e) => e.stopPropagation());
-permWarning.addEventListener("pointerdown", (e) => e.stopPropagation());
 
 // ---- Config ---------------------------------------------------------------
 
@@ -404,16 +488,31 @@ async function saveConfig() {
   } catch (e) {
     flash(String(e));
   }
-  // Clipboard mode toggles whether the Accessibility warning is relevant.
-  lastPermSig = null;
-  renderPermissionWarnings();
+  // Clipboard mode toggles whether the Accessibility warning is relevant; a
+  // model/mode switch changes whether the missing-model warning applies.
+  updateWarnings();
+  refreshModelWarning();
 }
 
 let flashTimer = null;
-function flash(msg) {
+// `action` (optional): { label, action } renders a button that stays until
+// tapped instead of auto-hiding, for prompts the user must act on.
+function flash(msg, action) {
   toast.textContent = msg;
   toast.classList.remove("hide");
   clearTimeout(flashTimer);
+  if (action) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "toast-action";
+    btn.textContent = action.label;
+    btn.addEventListener("click", () => {
+      toast.classList.add("hide");
+      action.action();
+    });
+    toast.appendChild(btn);
+    return;
+  }
   flashTimer = setTimeout(() => toast.classList.add("hide"), 2500);
 }
 
@@ -487,6 +586,15 @@ function rerenderCard() {
 // ---- Engine card: mode, model, acceleration -------------------------------
 
 function buildEngineCard(body) {
+  if (modelWarn() && !modelDownloading) {
+    body.appendChild(
+      warnBar(
+        `Model “${modelShort(config.offline.model)}” not downloaded — Spoke can't transcribe offline`,
+        [{ label: "Download", onClick: startModelDownload }]
+      )
+    );
+  }
+
   const modeSec = section("Mode");
   modeSec.appendChild(
     chipRow(
@@ -524,12 +632,12 @@ function buildEngineCard(body) {
   modelSec.appendChild(
     chipRow(
       [
-        { value: "tiny", label: "tiny" },
-        { value: "base", label: "base" },
-        { value: "small", label: "small" },
-        { value: "medium", label: "medium" },
-        { value: "large-v3-turbo", label: "turbo" },
-        { value: "large-v3", label: "large" },
+        { value: "tiny", label: "tiny", note: "74 MB" },
+        { value: "base", label: "base", note: "141 MB" },
+        { value: "small", label: "small", note: "465 MB" },
+        { value: "medium", label: "medium", note: "1.4 GB" },
+        { value: "large-v3-turbo", label: "turbo", note: "1.5 GB" },
+        { value: "large-v3", label: "large", note: "2.9 GB" },
       ],
       config.offline.model,
       async (v) => {
@@ -687,6 +795,41 @@ function buildLanguageCard(body) {
 // ---- Output card: destination + audio saving --------------------------------
 
 function buildOutputCard(body) {
+  if (missingPermissions().includes("accessibility")) {
+    body.appendChild(
+      warnBar(`${PERM_INFO.accessibility.label} — ${PERM_INFO.accessibility.hint}`, [
+        {
+          label: "Grant permission",
+          onClick: async () => {
+            // The native AX prompt registers the *current* binary with TCC;
+            // Settings then opens on the right pane so the user can flip the
+            // toggle. The grant registers live — no restart in the normal path.
+            try { await invoke("request_accessibility_permission"); } catch (_) { /* not macOS */ }
+            invoke("open_permission_settings", { which: "accessibility" });
+            watchForGrant();
+            flash("Enable Spoke in the Accessibility list — it applies within seconds.");
+          },
+        },
+        {
+          label: "Already on? Fix it",
+          onClick: async () => {
+            // Stale grant: Settings shows Spoke enabled, but the entry was
+            // recorded for a previous build of the binary so the OS still says
+            // no. Reset the entry and re-register this binary.
+            try { await invoke("reset_permission", { which: "accessibility" }); } catch (_) { /* not macOS */ }
+            try { await invoke("request_accessibility_permission"); } catch (_) { /* not macOS */ }
+            invoke("open_permission_settings", { which: "accessibility" });
+            watchForGrant();
+            flash("Permission reset — enable Spoke in the list again. Still stuck?", {
+              label: "Restart Spoke",
+              action: () => invoke("restart_app"),
+            });
+          },
+        },
+      ])
+    );
+  }
+
   const destSec = section("Destination");
   destSec.appendChild(
     chipRow(
@@ -757,6 +900,41 @@ function buildOutputCard(body) {
 // ---- Microphone card ----------------------------------------------------------
 
 async function buildMicCard(body) {
+  if (permissions && permissions.microphone !== "granted" && permissions.microphone !== "unknown") {
+    // Fire the native mic prompt and refresh. A grant from this prompt applies
+    // to the running process instantly — no Settings trip, no restart.
+    const promptForMic = async () => {
+      const granted = await invoke("request_microphone_permission").catch(() => true);
+      await checkPermissions();
+      if (!granted) rerenderCard();
+    };
+    body.appendChild(
+      permissions.microphone === "denied"
+        ? warnBar(`${PERM_INFO.microphone.label} — ${PERM_INFO.microphone.hint}`, [
+            {
+              label: "Ask me again",
+              onClick: async () => {
+                // Clear the denied (or stale, from an older build) TCC entry so
+                // the OS treats us as never-asked, then re-prompt natively.
+                try { await invoke("reset_permission", { which: "microphone" }); } catch (_) { /* not macOS */ }
+                await promptForMic();
+              },
+            },
+            {
+              label: "Open Settings",
+              onClick: () => {
+                invoke("open_permission_settings", { which: "microphone" });
+                watchForGrant();
+                flash("Toggle Spoke on. If macOS asks to reopen the app, let it.");
+              },
+            },
+          ])
+        : warnBar("Microphone not enabled yet — Spoke can't hear you", [
+            { label: "Enable microphone", onClick: promptForMic },
+          ])
+    );
+  }
+
   const sec = section("Input device");
   sec.insertAdjacentHTML("beforeend", '<span class="muted">Loading…</span>');
   body.appendChild(sec);
@@ -936,7 +1114,10 @@ function mosaicStep(dt) {
   }
   for (const m in modeW) modeW[m] /= sum;
 
-  errB = lerp(errB, isError ? 1 : 0, k);
+  errB  = lerp(errB, isError ? 1 : 0, k);
+  warnB = lerp(warnB, warnActive ? 1 : 0, k);
+  // Both error and warning use the same amber pulse — take whichever is stronger.
+  const amber = Math.max(errB, warnB);
 
   // Press spring: fast attack, softer release.
   const pk = 1 - Math.exp(-dt * (pressTarget > press ? 22 : 8));
@@ -945,10 +1126,10 @@ function mosaicStep(dt) {
   for (const key in shapeP) {
     let v = 0;
     for (const m in modeW) v += MODES[m].shape[key] * modeW[m];
-    if (errB > 0.001) {
-      if (key === 'jitterAmp')   v = lerp(v, 0.06, errB);
-      if (key === 'breathAmp')   v = lerp(v, 0.06, errB);
-      if (key === 'breathSpeed') v = lerp(v, 5.2, errB);
+    if (amber > 0.001) {
+      if (key === 'jitterAmp')   v = lerp(v, 0.06, amber);
+      if (key === 'breathAmp')   v = lerp(v, 0.06, amber);
+      if (key === 'breathSpeed') v = lerp(v, 5.2, amber);
     }
     shapeP[key] = lerp(shapeP[key], v, k);
   }
@@ -988,9 +1169,11 @@ function drawMosaic(now) {
       bfg[i] += pal.fg[i] * modeW[m];
     }
   }
+  // Amber overlay = strongest of transient error and persistent warning.
+  const amber = Math.max(errB, warnB);
   for (let i = 0; i < 3; i++) {
-    bbg[i] = lerp(bbg[i], ERROR_PAL.bg[i], errB * 0.85);
-    bfg[i] = lerp(bfg[i], ERROR_PAL.fg[i], errB * 0.85);
+    bbg[i] = lerp(bbg[i], ERROR_PAL.bg[i], amber * 0.85);
+    bfg[i] = lerp(bfg[i], ERROR_PAL.fg[i], amber * 0.85);
   }
 
   // Transparent outside the blob — everything beyond the boundary stays clear.
@@ -1063,9 +1246,9 @@ function drawMosaic(now) {
         const waveB = Math.sin(mosaicT * 2.4 - distN * 8 + th * 2);
         v += wP * (0.10 + (waveA * 0.5 + 0.5) * 0.38 + (waveB * 0.5 + 0.5) * 0.30);
       }
-      if (errB > 0.02) {
+      if (amber > 0.02) {
         const ve = 0.12 + Math.max(0, Math.sin(mosaicT * 5 - distN * 4)) * 0.55 + blink * 0.35;
-        v = lerp(v, ve, errB * 0.85);
+        v = lerp(v, ve, amber * 0.85);
       }
       // Press ripple radiating outward from the click.
       if (pressAge < 0.8) {
@@ -1094,7 +1277,7 @@ function drawMosaic(now) {
 
   // Soft outline tracing the boundary — helps the silhouette read against
   // busy desktop backgrounds.
-  const baseA = 0.34 + errB * blink * 0.45;
+  const baseA = 0.34 + amber * blink * 0.45;
   mCtx.lineWidth = 1;
   mCtx.strokeStyle = `rgba(${bfg[0] | 0},${bfg[1] | 0},${bfg[2] | 0},${baseA.toFixed(3)})`;
   mCtx.stroke(path);
@@ -1108,6 +1291,7 @@ function tick(now) {
   requestAnimationFrame(tick);
   if (document.hidden) return;
   const settled = modeW.idle > 0.995 && errB < 0.005 &&
+                  warnB < 0.005 && !warnActive &&
                   press < 0.01 && pressTarget === 0 &&
                   mosaicT - popT > 1.2;
   if (settled && now - lastFrame < IDLE_INTERVAL) return;
@@ -1161,6 +1345,8 @@ async function checkCurrentModel() {
       setStat("modelStatus", "not downloaded", "");
       $("downloadModel") && $("downloadModel").classList.remove("hide");
     }
+    modelMissing = !info.exists;
+    updateWarnings();
     if (coremlRelevant()) updateCoremlStatus(info.coreml_exists);
   } catch (_) {
     setStat("modelStatus", "—", "");
@@ -1243,6 +1429,8 @@ listen("spoke:download-complete", (e) => {
   if (model === config.offline.model) {
     setStat("modelStatus", "✓ installed", "installed");
     $("downloadModel") && $("downloadModel").classList.add("hide");
+    modelMissing = false;
+    updateWarnings();
   }
   const b = $("downloadModel");
   if (b) {
@@ -1345,9 +1533,11 @@ async function init() {
   await loadBuildInfo();
   updateOrbitValues();
   checkPermissions();
+  refreshModelWarning();
   // Permissions can change behind our back (System Settings, TCC resets on
   // rebuild); poll cheaply so warnings appear and clear without a restart.
   setInterval(checkPermissions, 15000);
+  setInterval(refreshModelWarning, 15000);
   requestAnimationFrame(tick);
   // Window starts at 320×320; shrink to bubble-only size immediately.
   resizeAndReposition(BUBBLE_W, BUBBLE_H, true);

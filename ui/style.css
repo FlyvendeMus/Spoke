@@ -39,8 +39,7 @@ body {
 
 #bubble,
 #subcard,
-#orbit .orbit-b,
-#permWarning {
+#orbit .orbit-b {
   pointer-events: auto;
 }
 
@@ -472,6 +471,16 @@ body {
     opacity 0.25s ease,
     transform 0.3s var(--spring);
 }
+.toast-action {
+  margin-left: 8px;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--accent, var(--bg-soft));
+  color: var(--text);
+  font-size: 10px;
+  cursor: pointer;
+}
 #toast.hide {
   display: block !important;
   opacity: 0;
@@ -479,13 +488,15 @@ body {
   pointer-events: none;
 }
 
-/* ---- Permission warnings ---- */
-/* Amber "!" dot floating on the bubble's top-right corner. */
-.perm-badge {
-  position: fixed;
-  right: 13px;
-  bottom: 52px;
-  z-index: 3;
+/* ---- Warnings ---- */
+/* Amber "!" badge pinned to the top-right of a category bubble whose setting
+   needs attention (mic → microphone perm, output → accessibility perm,
+   engine → missing model). Lit/cleared by JS toggling .hide. */
+.ob-warn {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  z-index: 4;
   width: 15px;
   height: 15px;
   border-radius: 50%;
@@ -498,39 +509,68 @@ body {
   place-items: center;
   pointer-events: none;
   box-shadow: 0 0 6px rgba(255, 176, 32, 0.6);
+  animation: warnPulse 1.4s ease-in-out infinite;
+}
+@keyframes warnPulse {
+  0%,
+  100% {
+    box-shadow: 0 0 4px rgba(255, 176, 32, 0.5);
+  }
+  50% {
+    box-shadow: 0 0 11px rgba(255, 176, 32, 0.95);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ob-warn {
+    animation: none;
+  }
 }
 
-/* Card at the top of the window while the menu is open, one row per missing
-   permission. */
-.perm-warning {
-  position: fixed;
-  top: 8px;
-  right: 12px;
-  width: 316px;
+/* Yellow bar inside a card explaining the warning, with a grant/download
+   action. */
+.warn-bar {
   display: flex;
-  flex-direction: column;
-  gap: 4px;
-  border: 1px solid rgba(255, 176, 32, 0.4);
-  background: rgba(255, 176, 32, 0.08);
-  border-radius: 12px;
-  padding: 6px 8px;
-  font-size: 10px;
-  color: var(--warn);
-  line-height: 1.4;
-  backdrop-filter: blur(4px);
-}
-.perm-warning .perm-row {
-  display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 6px;
+  gap: 8px;
+  border: 1px solid rgba(255, 176, 32, 0.45);
+  background: rgba(255, 176, 32, 0.1);
+  border-radius: 10px;
+  padding: 7px 10px;
+  font-size: 10px;
+  line-height: 1.4;
+  color: var(--warn);
+  animation: warnBarPulse 1.8s ease-in-out infinite;
 }
-.perm-warning .mini-btn {
+@keyframes warnBarPulse {
+  0%,
+  100% {
+    border-color: rgba(255, 176, 32, 0.3);
+  }
+  50% {
+    border-color: rgba(255, 176, 32, 0.7);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .warn-bar {
+    animation: none;
+  }
+}
+.warn-bar .warn-text {
+  flex: 1;
+}
+/* With two action buttons the row is too tight for the text; give the text its
+   own line and let the buttons sit side by side beneath it. */
+.warn-bar:has(.mini-btn + .mini-btn) .warn-text {
+  flex: 1 1 100%;
+}
+.warn-bar .mini-btn {
   flex-shrink: 0;
   color: var(--warn);
-  border-color: rgba(255, 176, 32, 0.4);
+  border-color: rgba(255, 176, 32, 0.45);
 }
-.perm-warning .mini-btn:hover {
+.warn-bar .mini-btn:hover {
   border-color: var(--warn);
 }
 
@@ -574,25 +614,6 @@ body {
 #root.flip-y #toast {
   bottom: auto;
   top: 96px;
-}
-
-#root.flip-x .perm-badge {
-  right: auto;
-  left: 13px;
-}
-#root.flip-y .perm-badge {
-  bottom: auto;
-  top: 52px;
-}
-
-/* Warning card floats at the window end opposite the bubble. */
-#root.flip-x .perm-warning {
-  right: auto;
-  left: 12px;
-}
-#root.flip-y .perm-warning {
-  top: auto;
-  bottom: 8px;
 }
 
 /* ---- History list ---- */
