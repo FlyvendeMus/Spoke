@@ -10,6 +10,11 @@ const ring = $("ring");
 const orbit = $("orbit");
 const subcard = $("subcard");
 const toast = $("toast");
+const minimize = $("minimize");
+
+// True while hidden to the tray. When set, state changes push a colored tray
+// icon; cleared by the `spoke:restored` event when the window comes back.
+let minimized = false;
 
 let config = null;
 let recording = false;
@@ -60,6 +65,7 @@ function updateWarnings() {
   const missing = missingPermissions();
   const mWarn = modelWarn();
   warnActive = missing.length > 0 || mWarn;
+  updateTray();
 
   const lit = {
     mic: missing.includes("microphone"),
@@ -529,10 +535,25 @@ async function openRing() {
   subcard.classList.add("hidden");
   for (const b of orbit.children) b.classList.remove("active");
   updateWarnings();
+  minimize.classList.remove("hidden");
   presentFrame();
   // Re-check on open so badges reflect grants/downloads made since the last poll.
   checkPermissions();
   refreshModelWarning();
+}
+
+// Tray state priority: active pipeline wins, then warnings, then idle.
+function currentTrayState() {
+  if (bubble.classList.contains("recording")) return "recording";
+  if (bubble.classList.contains("processing")) return "processing";
+  if (warnActive || bubble.classList.contains("error")) return "warning";
+  return "idle";
+}
+
+// Push the tray color, but only while minimized (the tray is neutral otherwise).
+function updateTray() {
+  if (!minimized) return;
+  invoke("set_tray_state", { state: currentTrayState() });
 }
 
 function openCat(id) {
@@ -560,6 +581,7 @@ function closeMenu() {
   orbit.classList.add("closed");
   orbit.classList.remove("dimmed");
   subcard.classList.add("hidden");
+  minimize.classList.add("hidden");
   invoke("nudge_repaint");
   clearTimeout(closeTimer);
   if (IS_LINUX) {
@@ -588,7 +610,8 @@ document.addEventListener("pointerdown", (e) => {
   if (
     !subcard.contains(e.target) &&
     !orbit.contains(e.target) &&
-    !bubble.contains(e.target)
+    !bubble.contains(e.target) &&
+    !minimize.contains(e.target)
   ) {
     closeMenu();
   }
@@ -1250,6 +1273,7 @@ function setBubbleState(state, message) {
   if (wasProcessing && state === "idle") popT = mosaicT;
   recording = state === "recording";
   if (state === "error" && message) flash(message);
+  updateTray();
 }
 
 // Advance mode weights, error blend, press spring, and shape params.
@@ -1458,6 +1482,20 @@ function tick(now) {
 listen("spoke:state", (e) => {
   const { state, message } = e.payload;
   setBubbleState(state, message);
+});
+
+// Tray-click restore: the bubble is visible again, so stop coloring the tray.
+listen("spoke:restored", () => {
+  minimized = false;
+});
+
+// Minimize pill: close the menu, seed the tray color, then hide to the tray.
+minimize.addEventListener("click", async (e) => {
+  e.stopPropagation();
+  minimized = true;
+  closeMenu();
+  await invoke("set_tray_state", { state: currentTrayState() });
+  invoke("minimize_to_tray");
 });
 
 listen("spoke:transcript", (e) => {

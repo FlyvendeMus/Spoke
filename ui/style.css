@@ -39,8 +39,41 @@ body {
 
 #bubble,
 #subcard,
+#minimize,
 #orbit .orbit-b {
   pointer-events: auto;
+}
+
+/* ---- Minimize-to-tray pill ---- */
+/* Centered horizontally on the bubble, floating just above it. Only shown
+   while the menu is open (JS toggles .hidden). */
+#minimize {
+  position: fixed;
+  right: 27px; /* (16 + bubble/2) - width/2  →  40 - 13 */
+  bottom: 72px; /* 16 + bubble(48) + 8 gap */
+  width: 26px;
+  height: 18px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--bg-soft);
+  color: var(--muted);
+  font-size: 16px;
+  line-height: 1;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  padding: 0 0 3px;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.5);
+  opacity: 0.92;
+  transition: opacity 0.15s ease, transform 0.15s ease, color 0.15s ease;
+}
+#minimize:hover {
+  opacity: 1;
+  color: var(--text);
+  transform: translateY(-1px);
+}
+#minimize.hidden {
+  display: none;
 }
 
 /* ---- Bubble ---- */

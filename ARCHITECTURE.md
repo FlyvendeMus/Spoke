@@ -156,7 +156,14 @@ back to *Auto*.
   at least NVIDIA): repaints blend OVER the stale buffer instead of replacing
   it, so translucent pixels (drop shadows, fading elements) stack darker each
   frame and moving elements leave trails; only a window resize swaps in a
-  clean buffer. Countermeasure (Linux-gated): menu transitions are disabled
+  clean buffer. Root cause (found later): WebKitGTK ≥ 2.50 ships the
+  "damage propagation" feature (`PropagateDamagingInformation`) enabled by
+  default — only damaged rectangles get presented, and on a transparent
+  window their translucent pixels blend over the previous frame instead of
+  replacing it, until the next full redraw resets the cycle.
+  `disable_damage_propagation()` in lib.rs turns the feature off through the
+  WebKitSettings feature-list C API (called over FFI — the webkit2gtk crate's
+  bindings predate it). Countermeasure layer (Linux-gated): menu transitions are disabled
   in CSS (`html.linux` block — state changes are instant, hover feedback
   avoids shadow changes), and every discrete menu change is followed by one
   1px gravity-anchored "buffer swap" resize (`nudgeOnce`/`presentFrame` in

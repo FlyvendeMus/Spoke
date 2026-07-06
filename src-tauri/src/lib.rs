@@ -15,9 +15,13 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 use stt::SttEngine;
+use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem};
-use tauri::tray::TrayIconBuilder;
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, State};
+
+/// Stable id so commands can fetch the tray back via `tray_by_id`.
+const TRAY_ID: &str = "spoke-tray";
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
 /// Identifies the config fields that determine how an `SttEngine` is built.
@@ -683,6 +687,58 @@ fn register_hotkey(app: &AppHandle, cfg: &Config) -> anyhow::Result<()> {
 
 // ---- App entry ------------------------------------------------------------
 
+/// WebKitGTK ≥ 2.50 enables "damage propagation" by default: instead of
+/// presenting a fully repainted frame, only the damaged rectangles are pushed
+/// to the windowing system. On a transparent window this is broken (at least
+/// on NVIDIA/XWayland): the damaged region's translucent pixels get blended
+/// OVER the previous frame instead of replacing it, so drop shadows re-draw
+/// on top of themselves and darken with every repaint until the next full
+/// redraw (~10 s) resets the cycle. Turn the feature off for our webview.
+///
+/// The feature-list API (webkit 2.42+) postdates the webkit2gtk crate's
+/// bindings, so the C symbols are declared here directly; the library is
+/// already linked.
+#[cfg(target_os = "linux")]
+fn disable_damage_propagation(win: &tauri::WebviewWindow) {
+    use std::ffi::{c_char, c_void, CStr};
+    extern "C" {
+        fn webkit_settings_get_all_features() -> *mut c_void;
+        fn webkit_feature_list_get_length(list: *mut c_void) -> usize;
+        fn webkit_feature_list_get(list: *mut c_void, index: usize) -> *mut c_void;
+        fn webkit_feature_get_identifier(feature: *mut c_void) -> *const c_char;
+        fn webkit_settings_set_feature_enabled(
+            settings: *mut c_void,
+            feature: *mut c_void,
+            enabled: i32,
+        );
+        fn webkit_feature_list_unref(list: *mut c_void);
+    }
+    let _ = win.with_webview(|webview| {
+        use gtk::glib::translate::ToGlibPtr;
+        use webkit2gtk::WebViewExt;
+        let Some(settings) = webview.inner().settings() else {
+            return;
+        };
+        let settings_ptr: *mut webkit2gtk::ffi::WebKitSettings = settings.to_glib_none().0;
+        unsafe {
+            let list = webkit_settings_get_all_features();
+            if list.is_null() {
+                return;
+            }
+            for i in 0..webkit_feature_list_get_length(list) {
+                let feature = webkit_feature_list_get(list, i);
+                let id = webkit_feature_get_identifier(feature);
+                if !id.is_null()
+                    && CStr::from_ptr(id).to_bytes() == b"PropagateDamagingInformation"
+                {
+                    webkit_settings_set_feature_enabled(settings_ptr.cast(), feature, 0);
+                }
+            }
+            webkit_feature_list_unref(list);
+        }
+    });
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Linux windowing: force the X11 GDK backend (XWayland on Wayland sessions)
@@ -732,6 +788,8 @@ pub fn run() {
             is_recording,
             list_audio_devices,
             nudge_repaint,
+            minimize_to_tray,
+            set_tray_state,
             set_window_bounds,
             set_window_size_anchored,
             get_build_info,
@@ -786,6 +844,7 @@ pub fn run() {
                 // stick; with no decorations the user still can't drag-resize.
                 #[cfg(target_os = "linux")]
                 {
+                    disable_damage_propagation(&win);
                     let _ = win.set_resizable(true);
                     // After a resize, the X server fills not-yet-painted
                     // regions with the window's background before WebKit's
@@ -850,19 +909,100 @@ fn build_shortcut_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
 }
 
 fn build_tray(app: &tauri::App) -> tauri::Result<()> {
+    let show = MenuItem::with_id(app, "show", "Show Spoke", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit Spoke", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&quit])?;
-    TrayIconBuilder::new()
+    // The menu is the reliable restore path on Linux, where appindicator trays
+    // don't emit left-click events.
+    let menu = Menu::with_items(app, &[&show, &quit])?;
+    TrayIconBuilder::with_id(TRAY_ID)
         .icon(app.default_window_icon().unwrap().clone())
         .menu(&menu)
+        // Left click restores the window; the menu is right-click only.
+        .show_menu_on_left_click(false)
         .tooltip("Spoke")
-        .on_menu_event(|app, event| {
-            if event.id().as_ref() == "quit" {
-                app.exit(0);
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "show" => restore_from_tray(app),
+            "quit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                restore_from_tray(tray.app_handle());
             }
         })
         .build(app)?;
     Ok(())
+}
+
+/// Show the bubble again and reset the tray to its neutral icon.
+fn restore_from_tray(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window("bubble") {
+        let _ = win.show();
+        let _ = win.set_focus();
+    }
+    if let Some(tray) = app.tray_by_id(TRAY_ID) {
+        if let Some(icon) = app.default_window_icon().cloned() {
+            let _ = tray.set_icon(Some(icon));
+        }
+    }
+    // Tell the UI it's no longer minimized so it stops pushing tray colors.
+    let _ = app.emit("spoke:restored", ());
+}
+
+/// Hide every window; the app lives only in the tray until restored.
+#[tauri::command]
+fn minimize_to_tray(app: AppHandle) {
+    if let Some(win) = app.get_webview_window("bubble") {
+        let _ = win.hide();
+    }
+}
+
+/// Recolor the tray icon to reflect app state while minimized.
+/// gray = idle, red = recording, blue = processing, yellow = warning.
+#[tauri::command]
+fn set_tray_state(app: AppHandle, state: String) {
+    let color: [u8; 3] = match state.as_str() {
+        "recording" => [0xE5, 0x39, 0x35],
+        "processing" => [0x1E, 0x88, 0xE5],
+        "warning" => [0xFD, 0xD8, 0x35],
+        _ => [0x9E, 0x9E, 0x9E],
+    };
+    if let Some(tray) = app.tray_by_id(TRAY_ID) {
+        let _ = tray.set_icon(Some(colored_tray_icon(color)));
+    }
+}
+
+/// Build a filled, anti-aliased circle of the given RGB as a tray icon.
+fn colored_tray_icon(rgb: [u8; 3]) -> Image<'static> {
+    const SIZE: u32 = 32;
+    let r = SIZE as f32 / 2.0;
+    let edge = r - 1.5; // start of the anti-aliased rim
+    let mut buf = vec![0u8; (SIZE * SIZE * 4) as usize];
+    for y in 0..SIZE {
+        for x in 0..SIZE {
+            let dx = x as f32 + 0.5 - r;
+            let dy = y as f32 + 0.5 - r;
+            let dist = (dx * dx + dy * dy).sqrt();
+            let a = if dist <= edge {
+                1.0
+            } else if dist >= r {
+                0.0
+            } else {
+                (r - dist) / (r - edge)
+            };
+            let i = ((y * SIZE + x) * 4) as usize;
+            buf[i] = rgb[0];
+            buf[i + 1] = rgb[1];
+            buf[i + 2] = rgb[2];
+            buf[i + 3] = (a * 255.0) as u8;
+        }
+    }
+    Image::new_owned(buf, SIZE, SIZE)
 }
 
 /// Park the bubble in the bottom-right of the primary monitor.

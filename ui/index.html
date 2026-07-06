@@ -21,6 +21,11 @@
       <!-- Transient status toast (saved / errors) above the bubble. -->
       <div id="toast" class="hide"></div>
 
+      <!-- Minimize-to-tray pill: floats just above the bubble while the menu is
+           open. Hides every window; the app lives in the system tray until the
+           tray icon is clicked. -->
+      <button id="minimize" class="hidden" aria-label="Minimize to tray" title="Minimize to tray">–</button>
+
       <!-- The bubble: an organic mosaic blob drawn on a transparent canvas -->
       <button id="bubble" class="idle" aria-label="Spoke">
         <canvas id="ring" width="96" height="96"></canvas>

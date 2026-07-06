@@ -58,6 +58,11 @@ whisper-rs = { version = "0.16", optional = true }
 # tao's gtk (0.18 for tauri 2).
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18"
+# Already in the tree transitively via tauri/wry. Direct dep so run() can
+# reach WebKitSettings and disable the damage-propagation feature (the
+# feature-list API itself is newer than the crate's bindings, so it is
+# called over FFI; see disable_damage_propagation()).
+webkit2gtk = "2.0"
 
 # macOS permission queries (mic TCC status, Accessibility trust) — already in
 # the tree transitively via tauri, so this adds no new builds.
