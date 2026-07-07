@@ -77,7 +77,7 @@ Spoke uses whatever your hardware is best at. Each build is made for one platfor
 | Linux | NVIDIA GPU (CUDA), any GPU (Vulkan), or CPU |
 | Windows | NVIDIA GPU (CUDA), any GPU (Vulkan), or CPU |
 
-The settings panel shows which one is active (the badge next to the version number). Change it anytime — no reinstall, no restart.
+The engine bubble shows which one is active. Change it anytime — no reinstall, no restart.
 
 ## Get Spoke
 
