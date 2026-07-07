@@ -10,9 +10,9 @@
                                           
 ```
 
- [![Download](https://img.shields.io/badge/Download-Latest_Release-4A90D9?style=for-the-badge)](https://github.com/FlyvendeMus/Spoke/releases/latest)
+ [![Download](https://img.shields.io/badge/Download-Latest_Release-4A90D9?style=for-the-badge)](https://github.com/FlyvendeMus/Spoke/releases/latest) [![Donate](https://img.shields.io/badge/Donate-Support_Spoke-FF6B6B?style=for-the-badge)](https://rainhexer.space/donate)
 
-**Talk instead of type.** Hold a hotkey, speak, release — your words appear wherever your cursor is. Any app, any text field, on **macOS**, **Windows**, and **Linux**.
+**Talk instead of type.** Hold a hotkey, speak, release — your words appear wherever your cursor is. Any app, any text field, on **Linux**, **macOS** and **Windows**.
 
 ## How it works
 
@@ -43,6 +43,12 @@ The bubble is an organic and reactive indicator that lives in the corner of your
     <td align="center"><img src=".github/screenshots/bubble-warning.gif" width="120" alt="Warning bubble"><br><b>Warning</b><br>Something is wrong with your configuration</td>
   </tr>
 </table>
+
+## System tray
+
+The bubble can be minimized into the system tray. The tray icon mirrors the bubble's status colours — green for idle, red for recording, blue for processing, yellow for warning — so you always know what Spoke is doing, even when the bubble is hidden.
+
+Right-click the tray icon for a context menu with quick access to almost all functions: show/hide the bubble, toggle recording, switch between push-to-talk and toggle mode, toggle clipboard mode, open settings, and quit.
 
 ## Private by default
 
