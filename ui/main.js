@@ -1507,6 +1507,15 @@ listen("spoke:transcript", (e) => {
   if (menuState === "history") renderHistory();
 });
 
+// Config changed from the tray menu — adopt it and refresh any open UI so the
+// bubble's controls stay in sync with the tray.
+listen("spoke:config", (e) => {
+  if (!e.payload) return;
+  config = e.payload;
+  if (menuState === "ring") updateOrbitValues();
+  else rerenderCard();
+});
+
 // ---- Model download --------------------------------------------------
 // The status elements live inside the engine card, which may be closed while a
 // download runs — every DOM touch goes through null-safe helpers, and the

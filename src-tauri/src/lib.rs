@@ -16,12 +16,16 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use stt::SttEngine;
 use tauri::image::Image;
-use tauri::menu::{Menu, MenuItem};
+use tauri::menu::{CheckMenuItem, IsMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 /// Stable id so commands can fetch the tray back via `tray_by_id`.
 const TRAY_ID: &str = "spoke-tray";
+/// Most recent transcriptions to keep for the tray's quick-history menu.
+const TRAY_HISTORY_MAX: usize = 20;
+/// How many of those show at the top level; the rest fall into a submenu.
+const TRAY_HISTORY_QUICK: usize = 4;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
 /// Identifies the config fields that determine how an `SttEngine` is built.
@@ -66,6 +70,9 @@ pub struct SpokeState {
     /// Cached STT engine + the config signature it was built for. Built lazily
     /// on first transcription and reused until the relevant config changes.
     engine: Mutex<Option<(EngineKey, Arc<SttEngine>)>>,
+    /// Most-recent-first transcripts, capped at `TRAY_HISTORY_MAX`, feeding the
+    /// tray's quick-history menu.
+    history: Mutex<Vec<String>>,
 }
 
 impl SpokeState {
@@ -143,18 +150,25 @@ fn get_config(state: State<'_, Arc<SpokeState>>) -> Config {
 }
 
 #[tauri::command]
-fn set_config(
-    app: AppHandle,
-    state: State<'_, Arc<SpokeState>>,
-    new_config: Config,
-) -> Result<(), String> {
+fn set_config(app: AppHandle, new_config: Config) -> Result<(), String> {
+    apply_config(&app, new_config)
+}
+
+/// Persist a new config, swap it into shared state, re-register the hotkey,
+/// prewarm the engine, and refresh the tray menu. Shared by the `set_config`
+/// command (UI edits) and the tray menu handlers (tray edits); the latter is
+/// why this also emits `spoke:config` so the UI re-syncs its controls.
+fn apply_config(app: &AppHandle, new_config: Config) -> Result<(), String> {
     new_config.save().map_err(|e| e.to_string())?;
+    let state = app.state::<Arc<SpokeState>>();
     *state.config.lock().unwrap() = new_config.clone();
     // Re-register the hotkey in case it changed.
-    register_hotkey(&app, &new_config).map_err(|e| e.to_string())?;
+    register_hotkey(app, &new_config).map_err(|e| e.to_string())?;
     // Rebuild the engine in the background if engine-relevant config changed
     // (no-op otherwise), so the next recording doesn't pay the init cost.
-    prewarm_engine(&app, &state);
+    prewarm_engine(app, &state);
+    rebuild_tray_menu(app);
+    let _ = app.emit("spoke:config", &new_config);
     Ok(())
 }
 
@@ -652,6 +666,15 @@ async fn run_pipeline(app: &AppHandle, state: &Arc<SpokeState>, session: u64) ->
 
     let _ = app.emit("spoke:transcript", serde_json::json!({ "text": &transcript }));
 
+    // Record it for the tray's quick-history menu, then rebuild the menu so the
+    // new entry shows up.
+    {
+        let mut hist = state.history.lock().unwrap();
+        hist.insert(0, transcript.clone());
+        hist.truncate(TRAY_HISTORY_MAX);
+    }
+    rebuild_tray_menu(app);
+
     if dest.copies() {
         let text = transcript.clone();
         tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
@@ -775,6 +798,7 @@ pub fn run() {
         recording: AtomicBool::new(false),
         session: AtomicU64::new(0),
         engine: Mutex::new(None),
+        history: Mutex::new(Vec::new()),
     });
 
     tauri::Builder::default()
@@ -909,22 +933,15 @@ fn build_shortcut_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
 }
 
 fn build_tray(app: &tauri::App) -> tauri::Result<()> {
-    let show = MenuItem::with_id(app, "show", "Show Spoke", true, None::<&str>)?;
-    let quit = MenuItem::with_id(app, "quit", "Quit Spoke", true, None::<&str>)?;
-    // The menu is the reliable restore path on Linux, where appindicator trays
-    // don't emit left-click events.
-    let menu = Menu::with_items(app, &[&show, &quit])?;
+    let handle = app.handle();
+    let menu = build_tray_menu(handle)?;
     TrayIconBuilder::with_id(TRAY_ID)
         .icon(app.default_window_icon().unwrap().clone())
         .menu(&menu)
         // Left click restores the window; the menu is right-click only.
         .show_menu_on_left_click(false)
         .tooltip("Spoke")
-        .on_menu_event(|app, event| match event.id().as_ref() {
-            "show" => restore_from_tray(app),
-            "quit" => app.exit(0),
-            _ => {}
-        })
+        .on_menu_event(handle_tray_menu_event)
         .on_tray_icon_event(|tray, event| {
             if let TrayIconEvent::Click {
                 button: MouseButton::Left,
@@ -937,6 +954,279 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
         })
         .build(app)?;
     Ok(())
+}
+
+/// Rebuild the tray's context menu from current config + history and swap it in.
+/// Menus are static once built, so any state that the menu reflects (a new
+/// transcript, a changed setting) has to re-run this. Cheap enough to call on
+/// every transcription. Silently no-ops if the tray isn't up yet.
+fn rebuild_tray_menu(app: &AppHandle) {
+    if let Some(tray) = app.tray_by_id(TRAY_ID) {
+        if let Ok(menu) = build_tray_menu(app) {
+            let _ = tray.set_menu(Some(menu));
+        }
+    }
+}
+
+/// Collapse a transcript to a single-line, length-capped menu label.
+fn truncate_label(text: &str) -> String {
+    let one_line: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    const MAX: usize = 48;
+    if one_line.chars().count() > MAX {
+        let mut s: String = one_line.chars().take(MAX).collect();
+        s.push('…');
+        s
+    } else {
+        one_line
+    }
+}
+
+/// Build the full tray context menu: restore, quick history + overflow submenu,
+/// a Settings submenu mirroring the bubble's controls, and quit.
+fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
+    let cfg = app.state::<Arc<SpokeState>>().config_snapshot();
+    let history = app.state::<Arc<SpokeState>>().history.lock().unwrap().clone();
+
+    let show = MenuItem::with_id(app, "show", "Show Spoke", true, None::<&str>)?;
+    let sep1 = PredefinedMenuItem::separator(app)?;
+    let sep2 = PredefinedMenuItem::separator(app)?;
+    let quit = MenuItem::with_id(app, "quit", "Quit Spoke", true, None::<&str>)?;
+
+    // ---- Quick history + overflow submenu ----
+    // Own the dynamically built items so `&dyn IsMenuItem` refs into them stay
+    // valid until the menu is constructed.
+    let mut quick_items: Vec<MenuItem<tauri::Wry>> = Vec::new();
+    for (i, text) in history.iter().take(TRAY_HISTORY_QUICK).enumerate() {
+        quick_items.push(MenuItem::with_id(
+            app,
+            format!("hist:{i}"),
+            truncate_label(text),
+            true,
+            None::<&str>,
+        )?);
+    }
+    let mut overflow_items: Vec<MenuItem<tauri::Wry>> = Vec::new();
+    for (i, text) in history.iter().enumerate().skip(TRAY_HISTORY_QUICK) {
+        overflow_items.push(MenuItem::with_id(
+            app,
+            format!("hist:{i}"),
+            truncate_label(text),
+            true,
+            None::<&str>,
+        )?);
+    }
+
+    let history_header = MenuItem::with_id(app, "hist-header", "Recent transcriptions", false, None::<&str>)?;
+    let history_empty = MenuItem::with_id(app, "hist-empty", "No transcriptions yet", false, None::<&str>)?;
+    let overflow_menu = if overflow_items.is_empty() {
+        None
+    } else {
+        let refs: Vec<&dyn IsMenuItem<tauri::Wry>> =
+            overflow_items.iter().map(|m| m as &dyn IsMenuItem<tauri::Wry>).collect();
+        Some(Submenu::with_items(app, "Older transcriptions", true, &refs)?)
+    };
+
+    // ---- Settings submenu ----
+    let settings = build_settings_submenu(app, &cfg)?;
+
+    // ---- Assemble top level ----
+    let mut items: Vec<&dyn IsMenuItem<tauri::Wry>> = vec![&show, &sep1];
+    items.push(&history_header);
+    if history.is_empty() {
+        items.push(&history_empty);
+    } else {
+        for it in &quick_items {
+            items.push(it);
+        }
+        if let Some(ref sub) = overflow_menu {
+            items.push(sub);
+        }
+    }
+    items.push(&sep2);
+    items.push(&settings);
+    let quit_sep = PredefinedMenuItem::separator(app)?;
+    items.push(&quit_sep);
+    items.push(&quit);
+
+    Menu::with_items(app, &items)
+}
+
+/// The Settings submenu: mode, model (offline only), trigger, output, language,
+/// and the save-audio toggle. Ids are `<group>:<value>`; the handler routes them.
+fn build_settings_submenu(app: &AppHandle, cfg: &Config) -> tauri::Result<Submenu<tauri::Wry>> {
+    use config::{Mode, OutputDest, Trigger};
+
+    // Mode.
+    let mode_off = CheckMenuItem::with_id(app, "mode:offline", "Offline (Whisper)", true, cfg.general.mode == Mode::Offline, None::<&str>)?;
+    let mode_on = CheckMenuItem::with_id(app, "mode:online", "Online (Cloud STT)", true, cfg.general.mode == Mode::Online, None::<&str>)?;
+    let mode = Submenu::with_items(app, "Mode", true, &[&mode_off, &mode_on])?;
+
+    // Trigger.
+    let trig_ptt = CheckMenuItem::with_id(app, "trigger:push_to_talk", "Push to talk", true, cfg.general.trigger == Trigger::PushToTalk, None::<&str>)?;
+    let trig_tog = CheckMenuItem::with_id(app, "trigger:toggle", "Toggle", true, cfg.general.trigger == Trigger::Toggle, None::<&str>)?;
+    let trigger = Submenu::with_items(app, "Trigger", true, &[&trig_ptt, &trig_tog])?;
+
+    // Output destination.
+    let out_type = CheckMenuItem::with_id(app, "output:type", "Type it out", true, cfg.general.output_dest == OutputDest::Type, None::<&str>)?;
+    let out_copy = CheckMenuItem::with_id(app, "output:copy", "Copy to clipboard", true, cfg.general.output_dest == OutputDest::Copy, None::<&str>)?;
+    let out_both = CheckMenuItem::with_id(app, "output:both", "Type and copy", true, cfg.general.output_dest == OutputDest::Both, None::<&str>)?;
+    let output = Submenu::with_items(app, "Output", true, &[&out_type, &out_copy, &out_both])?;
+
+    // Language.
+    let langs = [
+        ("auto", "Auto"),
+        ("en", "English"),
+        ("da", "Danish"),
+        ("de", "German"),
+        ("es", "Spanish"),
+        ("fr", "French"),
+    ];
+    let lang_items: Vec<CheckMenuItem<tauri::Wry>> = langs
+        .iter()
+        .map(|(code, label)| {
+            CheckMenuItem::with_id(app, format!("lang:{code}"), *label, true, cfg.general.language == *code, None::<&str>)
+        })
+        .collect::<tauri::Result<_>>()?;
+    let lang_refs: Vec<&dyn IsMenuItem<tauri::Wry>> =
+        lang_items.iter().map(|m| m as &dyn IsMenuItem<tauri::Wry>).collect();
+    let language = Submenu::with_items(app, "Language", true, &lang_refs)?;
+
+    // Save-audio toggle.
+    let save_audio = CheckMenuItem::with_id(app, "save_audio:toggle", "Save recordings", true, cfg.recording.save_audio, None::<&str>)?;
+
+    let mut items: Vec<&dyn IsMenuItem<tauri::Wry>> = vec![&mode];
+
+    // Model submenu (offline builds only): list installed models plus current.
+    #[cfg(feature = "whisper")]
+    let model_menu;
+    #[cfg(feature = "whisper")]
+    let _model_items: Vec<CheckMenuItem<tauri::Wry>>;
+    #[cfg(feature = "whisper")]
+    {
+        let known = ["tiny", "base", "small", "medium", "large-v3-turbo", "large-v3"];
+        _model_items = known
+            .iter()
+            .filter(|m| stt::whisper::model_exists(m) || **m == cfg.offline.model)
+            .map(|m| {
+                CheckMenuItem::with_id(app, format!("model:{m}"), *m, true, cfg.offline.model == *m, None::<&str>)
+            })
+            .collect::<tauri::Result<_>>()?;
+        let refs: Vec<&dyn IsMenuItem<tauri::Wry>> =
+            _model_items.iter().map(|m| m as &dyn IsMenuItem<tauri::Wry>).collect();
+        model_menu = Submenu::with_items(app, "Model", true, &refs)?;
+        items.push(&model_menu);
+    }
+
+    items.push(&trigger);
+    items.push(&output);
+    items.push(&language);
+    let sep = PredefinedMenuItem::separator(app)?;
+    items.push(&sep);
+    items.push(&save_audio);
+
+    Submenu::with_items(app, "Settings", true, &items)
+}
+
+/// Route a tray menu click. Static ids restore/quit; `hist:<i>` copies a past
+/// transcript; `<group>:<value>` edits config and refreshes the menu + UI.
+fn handle_tray_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
+    let id = event.id().as_ref();
+    match id {
+        "show" => {
+            restore_from_tray(app);
+            return;
+        }
+        "quit" => {
+            app.exit(0);
+            return;
+        }
+        _ => {}
+    }
+
+    if let Some(idx) = id.strip_prefix("hist:") {
+        if let Ok(i) = idx.parse::<usize>() {
+            let text = app
+                .state::<Arc<SpokeState>>()
+                .history
+                .lock()
+                .unwrap()
+                .get(i)
+                .cloned();
+            if let Some(text) = text {
+                tauri::async_runtime::spawn_blocking(move || {
+                    if let Ok(mut cb) = arboard::Clipboard::new() {
+                        let _ = cb.set_text(&text);
+                    }
+                });
+            }
+        }
+        return;
+    }
+
+    let Some((group, value)) = id.split_once(':') else { return };
+    let mut cfg = app.state::<Arc<SpokeState>>().config_snapshot();
+    let changed = apply_setting(&mut cfg, group, value);
+    if changed {
+        if let Err(e) = apply_config(app, cfg) {
+            eprintln!("[spoke] tray config change failed: {e}");
+        }
+    }
+}
+
+/// Mutate `cfg` for a `<group>:<value>` tray id. Returns whether anything
+/// changed (an unknown/duplicate selection is a no-op).
+fn apply_setting(cfg: &mut Config, group: &str, value: &str) -> bool {
+    use config::{Mode, OutputDest, Trigger};
+    match group {
+        "mode" => {
+            let m = match value {
+                "online" => Mode::Online,
+                _ => Mode::Offline,
+            };
+            if cfg.general.mode == m {
+                return false;
+            }
+            cfg.general.mode = m;
+        }
+        "trigger" => {
+            let t = match value {
+                "toggle" => Trigger::Toggle,
+                _ => Trigger::PushToTalk,
+            };
+            if cfg.general.trigger == t {
+                return false;
+            }
+            cfg.general.trigger = t;
+        }
+        "output" => {
+            let o = match value {
+                "copy" => OutputDest::Copy,
+                "both" => OutputDest::Both,
+                _ => OutputDest::Type,
+            };
+            if cfg.general.output_dest == o {
+                return false;
+            }
+            cfg.general.output_dest = o;
+        }
+        "lang" => {
+            if cfg.general.language == value {
+                return false;
+            }
+            cfg.general.language = value.to_string();
+        }
+        "model" => {
+            if cfg.offline.model == value {
+                return false;
+            }
+            cfg.offline.model = value.to_string();
+        }
+        "save_audio" => {
+            cfg.recording.save_audio = !cfg.recording.save_audio;
+        }
+        _ => return false,
+    }
+    true
 }
 
 /// Show the bubble again and reset the tray to its neutral icon.
