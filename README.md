@@ -37,10 +37,10 @@ The bubble is an organic and reactive indicator that lives in the corner of your
 
 <table>
   <tr>
-    <td align="center"><img src=".github/screenshots/bubble-idle.png" width="120" alt="Idle bubble"><br><b>Idle</b><br>Waiting for input</td>
-    <td align="center"><img src=".github/screenshots/bubble-recording.png" width="120" alt="Recording bubble"><br><b>Recording</b><br>Listeing to what you are saying</td>
-    <td align="center"><img src=".github/screenshots/bubble-processing.png" width="120" alt="Processing bubble"><br><b>Transcribing</b><br>Prosessing your speech</td>
-    <td align="center"><img src=".github/screenshots/bubble-warning.png" width="120" alt="Warning bubble"><br><b>Warning</b><br>Something is wrong with your configuration</td>
+    <td align="center"><img src=".github/screenshots/bubble-idle.gif" width="120" alt="Idle bubble"><br><b>Idle</b><br>Waiting for input</td>
+    <td align="center"><img src=".github/screenshots/bubble-recording.gif" width="120" alt="Recording bubble"><br><b>Recording</b><br>Listeing to what you are saying</td>
+    <td align="center"><img src=".github/screenshots/bubble-processing.gif" width="120" alt="Processing bubble"><br><b>Transcribing</b><br>Prosessing your speech</td>
+    <td align="center"><img src=".github/screenshots/bubble-warning.gif" width="120" alt="Warning bubble"><br><b>Warning</b><br>Something is wrong with your configuration</td>
   </tr>
 </table>
 
