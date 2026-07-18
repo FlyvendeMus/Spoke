@@ -1,6 +1,13 @@
 # Spoke
 ### Cross-platform voice-to-text dictation for the desktop
 
+> **Historical document.** This is the original product specification, kept for
+> reference. Some details drifted during implementation (the online engine uses
+> the Google Speech-to-Text **v1** REST API with LINEAR16 audio, not v2/Chirp
+> with FLAC; only the `google` provider exists; the API key is stored in plain
+> text in `spoke.toml`; model sizes and crate versions differ). For how Spoke
+> actually works today, see [ARCHITECTURE.md](ARCHITECTURE.md).
+
 ---
 
 ## Overview
@@ -195,8 +202,8 @@ accel = "auto"            # "auto" | "metal" | "coreml" | "cuda" | "vulkan" | "n
                           # only backends compiled into the build take effect
 
 [online]
-provider = "google"       # "google" | "openai"
-api_key = ""              # stored in system keychain in production
+provider = "google"       # only "google" is implemented
+api_key = ""              # stored as plain text in this file
 
 [recording]
 save_audio = false
@@ -241,7 +248,8 @@ toml           = "0.8"
 
 ## Project Status
 
-Pre-development. This document is the founding specification.
+Implemented — see [ARCHITECTURE.md](ARCHITECTURE.md) for the shipped design.
+This document is the founding specification, preserved as written.
 
 ---
 

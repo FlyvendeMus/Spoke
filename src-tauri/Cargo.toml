@@ -17,6 +17,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = ["tray-icon", "macos-private-api"] }
 tauri-plugin-global-shortcut = "2"
+tauri-plugin-notification = "2"
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -32,7 +33,7 @@ enigo = "0.2"
 # Clipboard access
 arboard = { version = "3", features = ["wayland-data-control"] }
 
-# Online STT (Google Cloud Speech-to-Text v2)
+# Online STT (Google Cloud Speech-to-Text v1)
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 base64 = "0.22"
 
@@ -89,6 +90,14 @@ cuda = ["whisper", "whisper-rs/cuda"]
 # AMD/Intel/NVIDIA GPU acceleration via Vulkan. Implies `whisper`.
 # Linux/Windows only.
 vulkan = ["whisper", "whisper-rs/vulkan"]
+
+# Headless build: no bubble window — Spoke lives entirely in the system tray
+# (status colors + full settings/history context menu). The bubble window is
+# created programmatically in lib.rs setup(), gated on `not(tray-only)`, so this
+# flag alone compiles out the window with no companion config needed. Combine
+# with any platform preset:
+#   cargo tauri build --features platform-linux-cpu,tray-only
+tray-only = []
 
 # ---- Platform presets -------------------------------------------------------
 # One flag per shipping target. These are the flags release builds should use;

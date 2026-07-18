@@ -167,6 +167,44 @@ pub fn model_exists(model: &str) -> bool {
     resolve_model_path(model).is_some()
 }
 
+/// Approximate on-disk download size for a known model, as a display label.
+/// Empty for unknown models. Kept in sync with the bubble UI's chip notes.
+pub fn model_size_label(model: &str) -> &'static str {
+    match model {
+        "tiny" => "74 MB",
+        "base" => "141 MB",
+        "small" => "465 MB",
+        "medium" => "1.4 GB",
+        "large-v3-turbo" => "1.5 GB",
+        "large-v3" => "2.9 GB",
+        _ => "",
+    }
+}
+
+/// Delete a downloaded model from the runtime models dir.
+///
+/// Only removes `ggml-<model>.bin` inside `models_dir()`; the read-only build-dir
+/// copy shipped with a binary is never touched. The model name is validated to
+/// safe characters and the resolved path is confined to `models_dir()`, so this
+/// can't be tricked into deleting anything outside the models directory. A
+/// missing file is a no-op (idempotent). Callers restrict `model` to the known
+/// set before reaching here.
+pub fn delete_model(model: &str) -> std::io::Result<()> {
+    use std::io::{Error, ErrorKind};
+    if model.is_empty() || !model.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return Err(Error::new(ErrorKind::InvalidInput, "invalid model name"));
+    }
+    let dir = models_dir();
+    let path = dir.join(format!("ggml-{model}.bin"));
+    if path.parent() != Some(dir.as_path()) {
+        return Err(Error::new(ErrorKind::InvalidInput, "path escapes models dir"));
+    }
+    if path.exists() {
+        std::fs::remove_file(&path)?;
+    }
+    Ok(())
+}
+
 /// Resolve the model path checking the build dir first, then the runtime dir.
 pub fn resolve_model_path(model: &str) -> Option<PathBuf> {
     let name = format!("ggml-{model}.bin");

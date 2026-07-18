@@ -12,3 +12,6 @@ Spoke-*.AppImage
 *.local
 .env
 .DS_Store
+
+# Local tooling notes (not part of the release)
+CLAUDE.md

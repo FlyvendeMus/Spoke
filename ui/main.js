@@ -714,7 +714,7 @@ const CARD_TITLES = {
 
 function renderCard(id) {
   const extra =
-    id === "engine" ? '<span class="muted" id="version">v0.1.0</span>' : "";
+    id === "engine" ? '<span class="muted" id="version">v0.1</span>' : "";
   subcard.innerHTML = cardShell(CARD_TITLES[id], extra);
   subcard.querySelector(".card-back").addEventListener("click", backToRing);
   const body = subcard.querySelector(".card-body");
@@ -798,10 +798,12 @@ function buildEngineCard(body) {
   dl.innerHTML = `
     <span id="modelStatus">…</span>
     <button id="downloadModel" type="button" class="mini-btn hide">Download</button>
+    <button id="deleteModel" type="button" class="mini-btn danger hide">Delete</button>
   `;
   modelSec.appendChild(dl);
   body.appendChild(modelSec);
   $("downloadModel").addEventListener("click", startModelDownload);
+  $("deleteModel").addEventListener("click", deleteCurrentModel);
 
   // Mark installed model chips with a checkmark.
   const modelIdx = { tiny: 0, base: 1, small: 2, medium: 3, "large-v3-turbo": 4, "large-v3": 5 };
@@ -1537,11 +1539,13 @@ async function checkCurrentModel() {
   const model = config.offline.model;
   setStat("modelStatus", "…", "");
   $("downloadModel") && $("downloadModel").classList.add("hide");
+  $("deleteModel") && $("deleteModel").classList.add("hide");
   try {
     const info = await invoke("check_model", { model });
     if (model !== config.offline.model) return; // stale response
     if (info.exists) {
       setStat("modelStatus", "✓ installed", "installed");
+      $("deleteModel") && $("deleteModel").classList.remove("hide");
     } else {
       setStat("modelStatus", "not downloaded", "");
       $("downloadModel") && $("downloadModel").classList.remove("hide");
@@ -1587,6 +1591,31 @@ async function startModelDownload() {
       b.textContent = "Download";
     }
     flash(String(e));
+  }
+}
+
+async function deleteCurrentModel() {
+  if (modelDownloading) return;
+  const model = config.offline.model;
+  if (!window.confirm(`Delete the downloaded “${model}” model? You can re-download it anytime.`)) {
+    return;
+  }
+  const btn = $("deleteModel");
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = "…";
+  }
+  try {
+    await invoke("delete_model", { model });
+    // Rebuild the card so chip install-marks and status refresh from disk.
+    rerenderCard();
+  } catch (e) {
+    flash(String(e));
+    const b = $("deleteModel");
+    if (b) {
+      b.disabled = false;
+      b.textContent = "Delete";
+    }
   }
 }
 
@@ -1638,6 +1667,11 @@ listen("spoke:download-complete", (e) => {
     b.disabled = false;
     b.textContent = "Download";
   }
+});
+
+listen("spoke:model-deleted", () => {
+  // A model was removed (possibly from the tray); refresh the card if it's open.
+  if (menuState !== "closed" && menuState !== "ring") rerenderCard();
 });
 
 listen("spoke:coreml-progress", (e) => {

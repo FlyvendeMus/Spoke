@@ -85,6 +85,13 @@ that bundle them. Heavy dependencies are tied to the flags that need them —
 `coreml` builds. A build without a flag contains none of that flag's code or
 dependencies.
 
+Orthogonal to the platform presets, the `tray-only` feature
+(see [BUILD.md](BUILD.md#tray-only-build-no-bubble-window)) produces a headless
+build: the bubble window (created programmatically in `setup()`, not in
+`tauri.conf.json`) is compiled out, the tray icon is recolored directly from
+Rust state changes, downloads report via desktop notifications, and the event
+loop is kept alive without any windows.
+
 ### 2. `platform.rs` (single source of truth)
 
 - **Compile-time guards**: `compile_error!` rejects impossible combinations
@@ -255,6 +262,16 @@ Hugging Face (`ggerganov/whisper.cpp`) with progress events to the UI:
 Lookup order at runtime: `src-tauri/models/` (dev convenience) first, then
 `<config dir>/spoke/models/`. whisper.cpp finds the CoreML bundle by naming
 convention — no path configuration.
+
+Models are managed in one place — the bubble's Model section and the tray's
+Settings → Model submenu both let you use, download (with size), or **delete**
+a model. Deletion (`delete_model` command → `whisper::delete_model`) only
+removes `ggml-<name>.bin` from the runtime `<config dir>/spoke/models/` dir; it
+validates the model name to a safe charset and confines the path to that dir,
+and never touches the read-only `src-tauri/models/` build copy. Download
+success/failure and deletion also raise a desktop notification (via
+`tauri-plugin-notification`, fired from Rust), so headless tray-only builds
+report status without a window.
 
 Online mode needs no models: audio is sent as one batch REST request to
 Google Speech-to-Text v1 with the API key from config.

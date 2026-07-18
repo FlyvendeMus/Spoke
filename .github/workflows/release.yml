@@ -1,0 +1,154 @@
+# Builds every shipping variant of Spoke and attaches the installers to the
+# GitHub release that triggered the run.
+#
+# Matrix: one job per platform preset (see Cargo.toml) × two variants:
+#   complete  — the normal build with the bubble UI
+#   tray      — the `tray-only` feature: headless, tray icon + menu only
+#
+# Artifact names get a `<preset>` and (for tray builds) a `-tray` tag inserted
+# so the fourteen jobs never collide on the same release.
+#
+# Manual runs (workflow_dispatch) build everything but skip the upload step —
+# useful for testing the pipeline without cutting a release.
+
+name: Release builds
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.preset }} (${{ matrix.variant }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [complete, tray]
+        preset:
+          - platform-macos
+          - platform-linux-cpu
+          - platform-linux-vulkan
+          - platform-linux-cuda
+          - platform-windows-cpu
+          - platform-windows-vulkan
+          - platform-windows-cuda
+        include:
+          - preset: platform-macos
+            os: macos-latest
+            label: macos-arm64
+          - preset: platform-linux-cpu
+            os: ubuntu-22.04
+            label: linux-cpu
+          - preset: platform-linux-vulkan
+            os: ubuntu-22.04
+            label: linux-vulkan
+          - preset: platform-linux-cuda
+            os: ubuntu-22.04
+            label: linux-cuda
+          - preset: platform-windows-cpu
+            os: windows-latest
+            label: windows-cpu
+          - preset: platform-windows-vulkan
+            os: windows-latest
+            label: windows-vulkan
+          - preset: platform-windows-cuda
+            os: windows-latest
+            label: windows-cuda
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: ${{ matrix.label }}-${{ matrix.variant }}
+
+      - name: Install Tauri CLI
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm install -g @tauri-apps/cli@^2
+
+      - name: Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake pkg-config \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+            librsvg2-dev libssl-dev libasound2-dev patchelf
+
+      - name: Vulkan SDK (Linux)
+        if: matrix.preset == 'platform-linux-vulkan'
+        run: |
+          wget -qO- https://packages.lunarg.com/lunarg-signing-key-pub.asc | sudo tee /etc/apt/trusted.gpg.d/lunarg.asc
+          sudo wget -qO /etc/apt/sources.list.d/lunarg-vulkan-jammy.list https://packages.lunarg.com/vulkan/lunarg-vulkan-jammy.list
+          sudo apt-get update
+          sudo apt-get install -y vulkan-sdk
+
+      - name: Vulkan SDK (Windows)
+        if: matrix.preset == 'platform-windows-vulkan'
+        uses: humbletim/setup-vulkan-sdk@v1.2.1
+        with:
+          vulkan-query-version: latest
+          vulkan-components: Vulkan-Headers, Vulkan-Loader, Glslang, SPIRV-Tools
+          vulkan-use-cache: true
+
+      - name: CUDA toolkit
+        if: contains(matrix.preset, 'cuda')
+        uses: Jimver/cuda-toolkit@v0.2.19
+        with:
+          method: network
+          sub-packages: '["nvcc", "cudart", "cublas", "cublas_dev"]'
+
+      - name: libclang for bindgen (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo "LIBCLANG_PATH=C:\\Program Files\\LLVM\\bin" >> "$GITHUB_ENV"
+
+      - name: Build (complete)
+        if: matrix.variant == 'complete'
+        run: tauri build --features ${{ matrix.preset }}
+
+      - name: Build (tray-only)
+        if: matrix.variant == 'tray'
+        run: tauri build --features ${{ matrix.preset }},tray-only
+
+      # Bundle filenames only encode version + arch; add the preset (and tray
+      # tag) so uploads from parallel jobs never overwrite each other.
+      - name: Collect and tag artifacts
+        shell: bash
+        run: |
+          mkdir -p dist
+          tag="${{ matrix.label }}$([ "${{ matrix.variant }}" = "tray" ] && echo -tray)"
+          find src-tauri/target/release/bundle \
+              -type f \( -name '*.deb' -o -name '*.rpm' -o -name '*.AppImage' \
+                         -o -name '*.dmg' -o -name '*.msi' -o -name '*.exe' \) \
+              -not -path '*unpacked*' | while read -r f; do
+            base="$(basename "$f")"
+            cp "$f" "dist/${base%.*}_${tag}.${base##*.}"
+          done
+          ls -la dist
+
+      - name: Upload to release
+        if: github.event_name == 'release'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload '${{ github.event.release.tag_name }}' dist/* --clobber
+
+      - name: Keep artifacts (manual runs)
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: spoke-${{ matrix.label }}-${{ matrix.variant }}
+          path: dist/*

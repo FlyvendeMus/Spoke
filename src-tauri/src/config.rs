@@ -142,9 +142,9 @@ impl Default for Offline {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Online {
-    /// "google" | "openai"
+    /// Online STT provider. Only "google" is implemented.
     pub provider: String,
-    /// Stored in the system keychain in production; kept here for development.
+    /// Stored as plain text in `spoke.toml` — treat the file accordingly.
     pub api_key: String,
 }
 

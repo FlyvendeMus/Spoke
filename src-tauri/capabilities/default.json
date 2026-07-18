@@ -11,6 +11,7 @@
     "core:window:allow-show",
     "core:window:allow-hide",
     "core:event:default",
-    "global-shortcut:default"
+    "global-shortcut:default",
+    "notification:default"
   ]
 }

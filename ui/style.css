@@ -471,6 +471,11 @@ body {
   border-color: var(--rec);
   color: var(--rec);
 }
+/* Destructive action (delete a downloaded model). */
+.mini-btn.danger:hover {
+  border-color: var(--rec);
+  color: var(--rec);
+}
 
 /* ---- Text inputs (API key, save path) ---- */
 #subcard input[type="text"],

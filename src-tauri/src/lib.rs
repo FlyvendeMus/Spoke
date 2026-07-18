@@ -17,7 +17,9 @@ use std::sync::Mutex;
 use stt::SttEngine;
 use tauri::image::Image;
 use tauri::menu::{CheckMenuItem, IsMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
-use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::tray::TrayIconBuilder;
+#[cfg(not(feature = "tray-only"))]
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 /// Stable id so commands can fetch the tray back via `tray_by_id`.
@@ -134,8 +136,11 @@ fn prewarm_engine(app: &AppHandle, state: &Arc<SpokeState>) {
     let _ = app;
 }
 
-/// UI-facing recording state, sent on the `spoke:state` event.
+/// UI-facing recording state, sent on the `spoke:state` event. In tray-only
+/// builds there is no UI to react, so the tray icon is recolored here instead.
 fn emit_state(app: &AppHandle, state: &str, message: Option<String>) {
+    #[cfg(feature = "tray-only")]
+    apply_tray_state(app, if state == "error" { "warning" } else { state });
     let _ = app.emit(
         "spoke:state",
         serde_json::json!({ "state": state, "message": message }),
@@ -359,12 +364,57 @@ async fn download_coreml_bundle(app: AppHandle, model: String) -> Result<(), Str
     Ok(())
 }
 
+/// Fire a desktop notification. Works from the Rust side regardless of window
+/// capabilities, so headless tray-only builds get download status too. Silently
+/// ignores failures (a missing notification daemon must never break a download).
+#[cfg(feature = "whisper")]
+fn notify(app: &AppHandle, title: &str, body: &str) {
+    use tauri_plugin_notification::NotificationExt;
+    let _ = app.notification().builder().title(title).body(body).show();
+}
+
+/// Delete a downloaded model. Restricted to the known model set and to the
+/// runtime models dir (see `whisper::delete_model`). Refreshes the tray menu
+/// and tells the bubble so both reflect the freed slot immediately.
 #[cfg(feature = "whisper")]
 #[tauri::command]
-async fn download_model(
-    app: AppHandle,
-    model: String,
-) -> Result<(), String> {
+fn delete_model(app: AppHandle, model: String) -> Result<(), String> {
+    const KNOWN: [&str; 6] = ["tiny", "base", "small", "medium", "large-v3-turbo", "large-v3"];
+    if !KNOWN.contains(&model.as_str()) {
+        return Err(format!("unknown model: {model}"));
+    }
+    stt::whisper::delete_model(&model).map_err(|e| e.to_string())?;
+    rebuild_tray_menu(&app);
+    let _ = app.emit("spoke:model-deleted", serde_json::json!({ "model": model }));
+    notify(&app, "Model deleted", &format!("Removed the {model} model"));
+    Ok(())
+}
+
+/// Download a model, emitting progress/complete events and a desktop
+/// notification on success or failure. The streaming/atomic-rename work lives in
+/// `download_model_inner`; this wrapper only adds the terminal notification so
+/// both the bubble and headless tray builds report status the same way.
+#[cfg(feature = "whisper")]
+#[tauri::command]
+async fn download_model(app: AppHandle, model: String) -> Result<(), String> {
+    let res = download_model_inner(&app, &model).await;
+    match &res {
+        Ok(()) => {
+            let size = stt::whisper::model_size_label(&model);
+            let body = if size.is_empty() {
+                format!("{model} is ready to use")
+            } else {
+                format!("{model} ({size}) is ready to use")
+            };
+            notify(&app, "Model downloaded", &body);
+        }
+        Err(e) => notify(&app, "Download failed", &format!("{model}: {e}")),
+    }
+    res
+}
+
+#[cfg(feature = "whisper")]
+async fn download_model_inner(app: &AppHandle, model: &str) -> Result<(), String> {
     use futures_util::StreamExt;
     use tokio::io::AsyncWriteExt;
 
@@ -437,14 +487,6 @@ fn is_recording(state: State<'_, Arc<SpokeState>>) -> bool {
     state.recording.load(Ordering::SeqCst)
 }
 
-/// Force the bubble window to present its current content.
-///
-/// On Wayland, WebKitGTK never re-commits a transparent, unfocused window's
-/// surface on content change, so toggling the settings panel updates the DOM but
-/// not the pixels until an unrelated ~20s refresh. A real window resize triggers a
-/// surface reconfigure + commit, which is the only reliable way to present the new
-/// frame. We flip the width by 1px (oscillating, so it never drifts and the
-/// compositor can't coalesce it away); the change is imperceptible.
 /// Move and resize the bubble window together (boot placement, non-Linux
 /// open/close). Issued back-to-back so both land in the same event-loop turn.
 #[tauri::command]
@@ -801,7 +843,8 @@ pub fn run() {
         history: Mutex::new(Vec::new()),
     });
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
         .plugin(build_shortcut_plugin())
         .manage(state)
         .invoke_handler(tauri::generate_handler![
@@ -829,6 +872,8 @@ pub fn run() {
             check_models,
             #[cfg(feature = "whisper")]
             download_model,
+            #[cfg(feature = "whisper")]
+            delete_model,
             #[cfg(feature = "coreml")]
             download_coreml_bundle,
         ])
@@ -853,6 +898,31 @@ pub fn run() {
             prewarm_engine(&handle, &app.state::<Arc<SpokeState>>());
 
             build_tray(app)?;
+            #[cfg(feature = "whisper")]
+            install_tray_download_feedback(&handle);
+
+            // The bubble window is created here rather than declared in
+            // tauri.conf.json so that `tray-only` builds compile no window at
+            // all — the whole block below is cfg'd out, and generate_context
+            // sees an empty `windows` array. A single `--features tray-only`
+            // is therefore fully headless; no companion config is needed.
+            #[cfg(not(feature = "tray-only"))]
+            {
+                use tauri::{WebviewUrl, WebviewWindowBuilder};
+                WebviewWindowBuilder::new(app, "bubble", WebviewUrl::default())
+                    .title("Spoke")
+                    .inner_size(320.0, 320.0)
+                    .resizable(false)
+                    .decorations(false)
+                    .transparent(true)
+                    .always_on_top(true)
+                    .skip_taskbar(true)
+                    .shadow(false)
+                    .visible(true)
+                    .focused(false)
+                    .build()?;
+            }
+
             position_bubble(&handle);
 
             if let Some(win) = handle.get_webview_window("bubble") {
@@ -901,9 +971,30 @@ pub fn run() {
             }
 
             Ok(())
-        })
+        });
+
+    #[cfg(not(feature = "tray-only"))]
+    builder
         .run(tauri::generate_context!())
         .expect("error while running Spoke");
+
+    // With no windows, nothing keeps the event loop alive by default and a
+    // spurious exit request would tear the tray app down; only an explicit
+    // exit (the tray's Quit item calls `app.exit(0)`, which carries a code)
+    // is honored.
+    #[cfg(feature = "tray-only")]
+    {
+        let app = builder
+            .build(tauri::generate_context!())
+            .expect("error while building Spoke");
+        app.run(|_app, event| {
+            if let tauri::RunEvent::ExitRequested { code, api, .. } = event {
+                if code.is_none() {
+                    api.prevent_exit();
+                }
+            }
+        });
+    }
 }
 
 fn build_shortcut_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
@@ -935,25 +1026,53 @@ fn build_shortcut_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
 fn build_tray(app: &tauri::App) -> tauri::Result<()> {
     let handle = app.handle();
     let menu = build_tray_menu(handle)?;
-    TrayIconBuilder::with_id(TRAY_ID)
+    let builder = TrayIconBuilder::with_id(TRAY_ID)
         .icon(app.default_window_icon().unwrap().clone())
         .menu(&menu)
         // Left click restores the window; the menu is right-click only.
-        .show_menu_on_left_click(false)
+        // Tray-only builds have no window, so left click opens the menu too.
+        .show_menu_on_left_click(cfg!(feature = "tray-only"))
         .tooltip("Spoke")
-        .on_menu_event(handle_tray_menu_event)
-        .on_tray_icon_event(|tray, event| {
-            if let TrayIconEvent::Click {
-                button: MouseButton::Left,
-                button_state: MouseButtonState::Up,
-                ..
-            } = event
-            {
-                restore_from_tray(tray.app_handle());
-            }
-        })
-        .build(app)?;
+        .on_menu_event(handle_tray_menu_event);
+    #[cfg(not(feature = "tray-only"))]
+    let builder = builder.on_tray_icon_event(|tray, event| {
+        if let TrayIconEvent::Click {
+            button: MouseButton::Left,
+            button_state: MouseButtonState::Up,
+            ..
+        } = event
+        {
+            restore_from_tray(tray.app_handle());
+        }
+    });
+    builder.build(app)?;
     Ok(())
+}
+
+/// Wire model-download events (the same ones the bubble listens to) into tray
+/// feedback: the tray tooltip shows live download percent, and the menu rebuilds
+/// on completion so a freshly downloaded model moves from "Download model" up
+/// into "Model". Lets tray-only (headless) builds download models with feedback.
+#[cfg(feature = "whisper")]
+fn install_tray_download_feedback(handle: &AppHandle) {
+    use tauri::Listener;
+    let h = handle.clone();
+    handle.listen("spoke:download-progress", move |ev| {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(ev.payload()) {
+            let model = v["model"].as_str().unwrap_or("");
+            let percent = v["percent"].as_u64().unwrap_or(0);
+            if let Some(tray) = h.tray_by_id(TRAY_ID) {
+                let _ = tray.set_tooltip(Some(&format!("Downloading {model}… {percent}%")));
+            }
+        }
+    });
+    let h = handle.clone();
+    handle.listen("spoke:download-complete", move |_ev| {
+        if let Some(tray) = h.tray_by_id(TRAY_ID) {
+            let _ = tray.set_tooltip(Some("Spoke"));
+        }
+        rebuild_tray_menu(&h);
+    });
 }
 
 /// Rebuild the tray's context menu from current config + history and swap it in.
@@ -1030,6 +1149,13 @@ fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let settings = build_settings_submenu(app, &cfg)?;
 
     // ---- Assemble top level ----
+    // Tray-only builds have no bubble window to show.
+    #[cfg(feature = "tray-only")]
+    let mut items: Vec<&dyn IsMenuItem<tauri::Wry>> = {
+        let _ = (&show, &sep1);
+        Vec::new()
+    };
+    #[cfg(not(feature = "tray-only"))]
     let mut items: Vec<&dyn IsMenuItem<tauri::Wry>> = vec![&show, &sep1];
     items.push(&history_header);
     if history.is_empty() {
@@ -1051,8 +1177,12 @@ fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     Menu::with_items(app, &items)
 }
 
-/// The Settings submenu: mode, model (offline only), trigger, output, language,
-/// and the save-audio toggle. Ids are `<group>:<value>`; the handler routes them.
+/// The Settings submenu: mode, model management (use/download/delete, offline
+/// only) + acceleration, trigger, output, language, microphone, and the
+/// save-audio toggle — the same controls
+/// the bubble's radial menu exposes, minus the two that need free-text/key
+/// capture a native menu can't provide (the hotkey recorder and the online API
+/// key). Ids are `<group>:<value>`; the handler routes them.
 fn build_settings_submenu(app: &AppHandle, cfg: &Config) -> tauri::Result<Submenu<tauri::Wry>> {
     use config::{Mode, OutputDest, Trigger};
 
@@ -1091,35 +1221,133 @@ fn build_settings_submenu(app: &AppHandle, cfg: &Config) -> tauri::Result<Submen
         lang_items.iter().map(|m| m as &dyn IsMenuItem<tauri::Wry>).collect();
     let language = Submenu::with_items(app, "Language", true, &lang_refs)?;
 
+    // Input device: "Default" (empty id) plus every enumerated mic. Value is the
+    // raw device name (may contain colons — the handler splits only on the
+    // first), so the round-trip matches config.recording.input_device exactly.
+    let mic_default = CheckMenuItem::with_id(
+        app,
+        "mic:",
+        "Default",
+        true,
+        cfg.recording.input_device.is_empty(),
+        None::<&str>,
+    )?;
+    let mic_items: Vec<CheckMenuItem<tauri::Wry>> = list_audio_devices()
+        .into_iter()
+        .map(|name| {
+            let checked = cfg.recording.input_device == name;
+            CheckMenuItem::with_id(app, format!("mic:{name}"), name.clone(), true, checked, None::<&str>)
+        })
+        .collect::<tauri::Result<_>>()?;
+    let mut mic_refs: Vec<&dyn IsMenuItem<tauri::Wry>> = vec![&mic_default];
+    mic_refs.extend(mic_items.iter().map(|m| m as &dyn IsMenuItem<tauri::Wry>));
+    let microphone = Submenu::with_items(app, "Microphone", true, &mic_refs)?;
+
     // Save-audio toggle.
     let save_audio = CheckMenuItem::with_id(app, "save_audio:toggle", "Save recordings", true, cfg.recording.save_audio, None::<&str>)?;
 
     let mut items: Vec<&dyn IsMenuItem<tauri::Wry>> = vec![&mode];
 
-    // Model submenu (offline builds only): list installed models plus current.
+    // Model + Acceleration submenus (offline builds only). Mirrors the bubble's
+    // engine card. `Model` manages every known model in one place: each model is
+    // its own submenu — installed models offer "Use this model" + "Delete
+    // download"; missing models offer "Download (<size>)". `accel` lists the
+    // backends compiled into this binary plus "auto".
     #[cfg(feature = "whisper")]
-    let model_menu;
+    let (model_menu, accel_menu);
     #[cfg(feature = "whisper")]
-    let _model_items: Vec<CheckMenuItem<tauri::Wry>>;
+    let _accel_items: Vec<CheckMenuItem<tauri::Wry>>;
+    // All per-model children + submenus are kept alive until the enclosing
+    // Settings menu is built, since the menu only borrows them during assembly.
+    #[cfg(feature = "whisper")]
+    let (_model_use, _model_act): (Vec<CheckMenuItem<tauri::Wry>>, Vec<MenuItem<tauri::Wry>>);
+    #[cfg(feature = "whisper")]
+    let _model_subs: Vec<Submenu<tauri::Wry>>;
     #[cfg(feature = "whisper")]
     {
         let known = ["tiny", "base", "small", "medium", "large-v3-turbo", "large-v3"];
-        _model_items = known
-            .iter()
-            .filter(|m| stt::whisper::model_exists(m) || **m == cfg.offline.model)
-            .map(|m| {
-                CheckMenuItem::with_id(app, format!("model:{m}"), *m, true, cfg.offline.model == *m, None::<&str>)
-            })
-            .collect::<tauri::Result<_>>()?;
+
+        // Build every child item first so the backing vecs never reallocate
+        // while a submenu holds a borrow into them, then assemble one submenu
+        // per model by index.
+        struct Row {
+            name: &'static str,
+            installed: bool,
+            selected: bool,
+            use_i: Option<usize>,
+            act_i: usize,
+        }
+        let mut rows: Vec<Row> = Vec::new();
+        let mut use_items: Vec<CheckMenuItem<tauri::Wry>> = Vec::new();
+        let mut act_items: Vec<MenuItem<tauri::Wry>> = Vec::new();
+        for m in known {
+            let installed = stt::whisper::model_exists(m);
+            let selected = cfg.offline.model == m;
+            let use_i = if installed {
+                use_items.push(CheckMenuItem::with_id(app, format!("model:{m}"), "Use this model", true, selected, None::<&str>)?);
+                Some(use_items.len() - 1)
+            } else {
+                None
+            };
+            if installed {
+                act_items.push(MenuItem::with_id(app, format!("modeldel:{m}"), "Delete download", true, None::<&str>)?);
+            } else {
+                let size = stt::whisper::model_size_label(m);
+                act_items.push(MenuItem::with_id(app, format!("download:{m}"), format!("Download ({size})"), true, None::<&str>)?);
+            }
+            rows.push(Row { name: m, installed, selected, use_i, act_i: act_items.len() - 1 });
+        }
+
+        let mut subs: Vec<Submenu<tauri::Wry>> = Vec::new();
+        for r in &rows {
+            let size = stt::whisper::model_size_label(r.name);
+            let status = if r.selected { " ✓" } else if r.installed { " •" } else { "" };
+            let label = format!("{}{}  ·  {}", r.name, status, size);
+            let mut children: Vec<&dyn IsMenuItem<tauri::Wry>> = Vec::new();
+            if let Some(i) = r.use_i {
+                children.push(&use_items[i]);
+            }
+            children.push(&act_items[r.act_i]);
+            subs.push(Submenu::with_items(app, label, true, &children)?);
+        }
+        _model_use = use_items;
+        _model_act = act_items;
+        _model_subs = subs;
         let refs: Vec<&dyn IsMenuItem<tauri::Wry>> =
-            _model_items.iter().map(|m| m as &dyn IsMenuItem<tauri::Wry>).collect();
+            _model_subs.iter().map(|s| s as &dyn IsMenuItem<tauri::Wry>).collect();
         model_menu = Submenu::with_items(app, "Model", true, &refs)?;
         items.push(&model_menu);
+
+        // Acceleration: "auto" plus every compiled backend (best-first, CPU last).
+        let mut accel = vec![CheckMenuItem::with_id(
+            app,
+            "accel:auto",
+            "Auto",
+            true,
+            cfg.offline.accel == "auto",
+            None::<&str>,
+        )?];
+        for b in platform::compiled_backends() {
+            accel.push(CheckMenuItem::with_id(
+                app,
+                format!("accel:{}", b.id),
+                b.label,
+                true,
+                cfg.offline.accel == b.id,
+                None::<&str>,
+            )?);
+        }
+        _accel_items = accel;
+        let refs: Vec<&dyn IsMenuItem<tauri::Wry>> =
+            _accel_items.iter().map(|m| m as &dyn IsMenuItem<tauri::Wry>).collect();
+        accel_menu = Submenu::with_items(app, "Acceleration", true, &refs)?;
+        items.push(&accel_menu);
     }
 
     items.push(&trigger);
     items.push(&output);
     items.push(&language);
+    items.push(&microphone);
     let sep = PredefinedMenuItem::separator(app)?;
     items.push(&sep);
     items.push(&save_audio);
@@ -1159,6 +1387,30 @@ fn handle_tray_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
                     }
                 });
             }
+        }
+        return;
+    }
+
+    // Kick off a background model download. Progress + completion flow back
+    // through the same events the bubble uses; `install_tray_download_feedback`
+    // turns those into tray tooltip updates and a menu rebuild.
+    #[cfg(feature = "whisper")]
+    if let Some(model) = id.strip_prefix("download:") {
+        let app = app.clone();
+        let model = model.to_string();
+        tauri::async_runtime::spawn(async move {
+            if let Err(e) = download_model(app, model).await {
+                eprintln!("[spoke] tray model download failed: {e}");
+            }
+        });
+        return;
+    }
+
+    // Delete a downloaded model from the tray. delete_model refreshes the menu.
+    #[cfg(feature = "whisper")]
+    if let Some(model) = id.strip_prefix("modeldel:") {
+        if let Err(e) = delete_model(app.clone(), model.to_string()) {
+            eprintln!("[spoke] tray model delete failed: {e}");
         }
         return;
     }
@@ -1221,6 +1473,18 @@ fn apply_setting(cfg: &mut Config, group: &str, value: &str) -> bool {
             }
             cfg.offline.model = value.to_string();
         }
+        "accel" => {
+            if cfg.offline.accel == value {
+                return false;
+            }
+            cfg.offline.accel = value.to_string();
+        }
+        "mic" => {
+            if cfg.recording.input_device == value {
+                return false;
+            }
+            cfg.recording.input_device = value.to_string();
+        }
         "save_audio" => {
             cfg.recording.save_audio = !cfg.recording.save_audio;
         }
@@ -1252,11 +1516,10 @@ fn minimize_to_tray(app: AppHandle) {
     }
 }
 
-/// Recolor the tray icon to reflect app state while minimized.
+/// Recolor the tray icon to reflect app state:
 /// gray = idle, red = recording, blue = processing, yellow = warning.
-#[tauri::command]
-fn set_tray_state(app: AppHandle, state: String) {
-    let color: [u8; 3] = match state.as_str() {
+fn apply_tray_state(app: &AppHandle, state: &str) {
+    let color: [u8; 3] = match state {
         "recording" => [0xE5, 0x39, 0x35],
         "processing" => [0x1E, 0x88, 0xE5],
         "warning" => [0xFD, 0xD8, 0x35],
@@ -1265,6 +1528,12 @@ fn set_tray_state(app: AppHandle, state: String) {
     if let Some(tray) = app.tray_by_id(TRAY_ID) {
         let _ = tray.set_icon(Some(colored_tray_icon(color)));
     }
+}
+
+/// UI-driven tray recoloring while the bubble is minimized to the tray.
+#[tauri::command]
+fn set_tray_state(app: AppHandle, state: String) {
+    apply_tray_state(&app, &state);
 }
 
 /// Build a filled, anti-aliased circle of the given RGB as a tray icon.

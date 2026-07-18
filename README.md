@@ -26,8 +26,8 @@ Prefer tap-to-start / tap-to-stop? Switch to **Toggle** mode. Prefer the text on
 
 <table>
   <tr>
-    <td align="center"><img src=".github/screenshots/demo-typing.png" width="320" alt="Dictating into a text editor"><br>Dictating into a text editor</td>
-    <td align="center"><img src=".github/screenshots/demo-settings.png" width="320" alt="Switching models in settings"><br>Switching models in settings</td>
+    <td align="center"><img src=".github/screenshots/Dictating-MAC.gif" width="320" alt="Dictating into a text editor"><br>Dictating into a text editor</td>
+    <td align="center"><img src=".github/screenshots/Model-Change-MAC.gif" width="320" alt="Switching models in settings"><br>Switching models in settings</td>
   </tr>
 </table>
 
@@ -38,28 +38,30 @@ The bubble is an organic and reactive indicator that lives in the corner of your
 <table>
   <tr>
     <td align="center"><img src=".github/screenshots/bubble-idle.gif" width="120" alt="Idle bubble"><br><b>Idle</b><br>Waiting for input</td>
-    <td align="center"><img src=".github/screenshots/bubble-recording.gif" width="120" alt="Recording bubble"><br><b>Recording</b><br>Listeing to what you are saying</td>
-    <td align="center"><img src=".github/screenshots/bubble-processing.gif" width="120" alt="Processing bubble"><br><b>Transcribing</b><br>Prosessing your speech</td>
+    <td align="center"><img src=".github/screenshots/bubble-recording.gif" width="120" alt="Recording bubble"><br><b>Recording</b><br>Listening to what you are saying</td>
+    <td align="center"><img src=".github/screenshots/bubble-processing.gif" width="120" alt="Processing bubble"><br><b>Transcribing</b><br>Processing your speech</td>
     <td align="center"><img src=".github/screenshots/bubble-warning.gif" width="120" alt="Warning bubble"><br><b>Warning</b><br>Something is wrong with your configuration</td>
   </tr>
 </table>
 
 ## System tray
 
-The bubble can be minimized into the system tray. The tray icon mirrors the bubble's status colours — green for idle, red for recording, blue for processing, yellow for warning — so you always know what Spoke is doing, even when the bubble is hidden.
+The bubble can be minimized into the system tray. The tray icon mirrors the bubble's status colours — grey for idle, red for recording, blue for processing, yellow for warning — so you always know what Spoke is doing, even when the bubble is hidden.
 
-Right-click the tray icon for a context menu with quick access to almost all functions: show/hide the bubble, toggle recording, switch between push-to-talk and toggle mode, toggle clipboard mode, open settings, and quit.
+Right-click the tray icon for a context menu: restore the bubble, copy recent transcriptions, change the main settings (mode, model, trigger, output, language, audio saving), and quit.
+
+Prefer the tray without the bubble entirely? A dedicated **tray-only build** compiles the window out — see [BUILD.md](BUILD.md#tray-only-build-no-bubble-window).
 
 ## Private by default
 
-Spoke transcribes speech **on your own computer** using [Whisper](https://github.com/ggerganov/whisper.cpp). No account, no subscription, no audio leaving your machine, works compleatly offline.
+Spoke transcribes speech **on your own computer** using [Whisper](https://github.com/ggerganov/whisper.cpp). No account, no subscription, no audio leaving your machine, works completely offline.
 
-The first time you open settings, pick a model and click **Get** — Spoke downloads it for you:
+The first time you open settings, pick a model and click **Download** — Spoke fetches it for you:
 
 | Model | Size | Good for |
 |-------|------|----------|
-| tiny | 75 MB | Very old or low-power machines |
-| base | 145 MB | Fast, decent accuracy |
+| tiny | 74 MB | Very old or low-power machines |
+| base | 141 MB | Fast, decent accuracy |
 | small | 465 MB | Balanced |
 | medium | 1.4 GB | Better accuracy, more RAM |
 | large-v3-turbo | 1.5 GB | Best accuracy — the default |
@@ -81,7 +83,7 @@ The engine bubble shows which one is active. Change it anytime — no reinstall,
 
 ## Get Spoke
 
-Pre-built binaries are available on the [Releases page](https://github.com/USERNAME/Spoke/releases).
+Pre-built binaries are available on the [Releases page](https://github.com/FlyvendeMus/Spoke/releases).
 
 To build from source, see [BUILD.md](BUILD.md). It takes one command per platform once the toolchain is installed — the build produces a normal installer (`.dmg`, `.deb`, `.rpm`, `.AppImage`, `.msi`, or `.exe`). Speech models are downloaded in-app.
 
